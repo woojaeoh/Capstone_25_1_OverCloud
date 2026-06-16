@@ -174,6 +174,21 @@
                 </StackPanel>
             </Button>
 
+            <!-- LAN 직접 전송 버튼 -->
+            <Button x:Name="LanSendButton" Width="110" Height="40"
+                    Canvas.Left="650" Canvas.Top="170"
+                    Background="White" BorderBrush="#DDE2E4" BorderThickness="1"
+                    Click="Button_LanSend_Click">
+                <Button.Resources>
+                    <Style TargetType="Border">
+                        <Setter Property="CornerRadius" Value="5"/>
+                    </Style>
+                </Button.Resources>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="LAN 전송" FontSize="15" FontWeight="Bold"/>
+                </StackPanel>
+            </Button>
+
             <!-- 링크 다운로드 버튼 -->
             <Button x:Name="DownloadLinkButton" Width="120" Height="40"
                 Canvas.Left="906" Canvas.Top="170"

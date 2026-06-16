@@ -1078,6 +1078,15 @@ namespace overcloud.Views
             dialog.ShowDialog();
         }
 
+        private void Button_LanSend_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new LanSendWindow(_controller.LanTransferService, _user_id)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            dialog.ShowDialog();
+        }
+
 
         private void HomeView_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {

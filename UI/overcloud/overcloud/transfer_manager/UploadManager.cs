@@ -64,16 +64,25 @@ namespace OverCloud.transfer_manager
             }
         }
 
+        private static long ManagedHeapMB() =>
+            GC.GetTotalMemory(false) / 1024 / 1024;
+
+        private static long WorkingSetMB() =>
+            System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / 1024 / 1024;
+
         private async Task ProcessUpload(TransferItemViewModel item, UploadTaskInfo file, string userId)
         {
             try
             {
-                System.Windows.Application.Current.Dispatcher.Invoke(() => { 
+                long heapBefore = ManagedHeapMB();
+                long wsBefore   = WorkingSetMB();
+                Console.WriteLine($"[MEM] [{file.FileName}] 시작 — 힙:{heapBefore}MB  WorkingSet:{wsBefore}MB");
+
+                System.Windows.Application.Current.Dispatcher.Invoke(() => {
                     item.Status = "업로드 중";
-                    // 💡 파일 크기로 예상 업로드 시간 계산 (20MB/sec 기준)
                     ulong fileSizeBytes = (ulong)new FileInfo(file.LocalPath).Length;
                     double fileSizeMB = fileSizeBytes / (1024.0 * 1024.0);
-                    double expectedSeconds = Math.Max(3, fileSizeMB / 10.0); // 최소 3초 보장
+                    double expectedSeconds = Math.Max(3, fileSizeMB / 10.0);
                     item.StartFakeProgress(expectedSeconds);
                 });
 
@@ -83,6 +92,8 @@ namespace OverCloud.transfer_manager
                 bool result = bestStorage != null
                     ? await _fileUploadManager.file_upload(file.LocalPath, file.FolderId, userId)
                     : await _fileUploadManager.Upload_Distributed(file.LocalPath, file.FolderId, userId);
+
+                Console.WriteLine($"[MEM] [{file.FileName}] 완료 — 힙:{ManagedHeapMB()}MB  WorkingSet:{WorkingSetMB()}MB  (업로드 전 대비 힙 증가: {ManagedHeapMB() - heapBefore}MB)");
 
                 System.Windows.Application.Current.Dispatcher.Invoke(() =>
                 {

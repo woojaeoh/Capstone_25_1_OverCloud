@@ -87,8 +87,14 @@ namespace overcloud.Views
             App.TransferManager = new TransferManager(_controller.FileUploadManager, _controller.FileDownloadManager, _controller.CloudTierManager);
 
             _controller.user_id = userId;
+
+            // LAN 전송: 현재 IP를 DB에 등록하고 수신 서버 시작
+            string localIp = OverCloud.Services.LanTransferService.GetLocalIp();
+            _controller.AccountRepository.UpdateOnlineStatus(userId, localIp, true);
+            _controller.LanTransferService.StartListening();
+
             // MainWindow 실행
-            var main = new MainWindow(_controller,userId);
+            var main = new MainWindow(_controller, userId);
             System.Windows.Application.Current.MainWindow = main;
             main.Show();
 

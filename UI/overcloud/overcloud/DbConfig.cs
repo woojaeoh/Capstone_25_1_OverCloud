@@ -3,6 +3,7 @@ namespace overcloud
     public static class DbConfig
     {
         public static string ConnectionString =>
-            "server=overcloud.crywgqgyw87n.ap-northeast-2.rds.amazonaws.com;database=overcloud;uid=admin;pwd=admin123;";
+            "server=localhost;port=3306;database=overcloud_new;uid=root;pwd=Wodn134679!!;" +
+            "Pooling=true;MinimumPoolSize=5;MaximumPoolSize=50;ConnectionTimeout=30;";
     }
 }

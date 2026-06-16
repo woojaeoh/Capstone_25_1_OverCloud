@@ -22,6 +22,9 @@ namespace overcloud
         private const string MutexName = "OverCloudSingleInstance";
         private const string PipeName = "OverCloudPipe";
 
+        // 앱 생존 기간과 동일하게 Mutex를 유지해야 단일 인스턴스 보장됨
+        private Mutex _singleInstanceMutex;
+
         public static event Action DownloadRequestReceived;
 
         protected override void OnStartup(StartupEventArgs e)
@@ -29,22 +32,36 @@ namespace overcloud
             base.OnStartup(e);
 
             bool isNew;
-            using (Mutex mutex = new Mutex(true, MutexName, out isNew))
-            {
-                if (isNew)
-                {
-                    StartPipeServer();
-                    ParseArgs(e.Args); // 최초 실행시 파라미터도 누적만
+            _singleInstanceMutex = new Mutex(true, MutexName, out isNew);
 
-                    _controller = new LoginController();
-                    var loginWindow = new overcloud.Views.LoginWindow(_controller);
-                    loginWindow.Show();
-                }
-                else
-                {
-                    Shutdown();
-                }
+            if (isNew)
+            {
+                StartPipeServer();
+                ParseArgs(e.Args);
+
+                _controller = new LoginController();
+                var loginWindow = new overcloud.Views.LoginWindow(_controller);
+                loginWindow.Show();
             }
+            else
+            {
+                _singleInstanceMutex.Dispose();
+                Shutdown();
+            }
+        }
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            // 앱 종료 시 온라인 상태 해제 + LAN 서버 종료
+            if (_controller?.user_id != null)
+            {
+                _controller.AccountRepository.UpdateOnlineStatus(_controller.user_id, null, false);
+                _controller.LanTransferService.StopListening();
+            }
+
+            _singleInstanceMutex?.ReleaseMutex();
+            _singleInstanceMutex?.Dispose();
+            base.OnExit(e);
         }
 
         private void ParseArgs(string[] args)
