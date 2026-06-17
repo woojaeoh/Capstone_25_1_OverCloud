@@ -71,7 +71,7 @@ namespace overcloud.Views
                             AccountId = acc.AccountId,
                             Owner = coopId,
                             UsagePercent = acc.TotalCapacity > 0 ? (int)(acc.UsedCapacity * 100.0 / acc.TotalCapacity) : 0,
-                            UsageDisplay = $"{(acc.UsedCapacity / 1024 / 1024):F2}/{(acc.TotalCapacity / 1024 / 1024):F2} GB",
+                            UsageDisplay = $"{((double)acc.UsedCapacity / 1024 / 1024):F2}/{((double)acc.TotalCapacity / 1024 / 1024):F2} GB",
                             LastLoginDate = DateTime.Now,
                             IsSelected = false
                         });
@@ -91,7 +91,7 @@ namespace overcloud.Views
                         AccountId = acc.AccountId,
                         Owner = _selectedCoopId,
                         UsagePercent = acc.TotalCapacity > 0 ? (int)(acc.UsedCapacity * 100.0 / acc.TotalCapacity) : 0,
-                        UsageDisplay = $"{(acc.UsedCapacity / 1024 / 1024):F2}/{(acc.TotalCapacity / 1024 / 1024):F2} GB",
+                        UsageDisplay = $"{((double)acc.UsedCapacity / 1024 / 1024):F2}/{((double)acc.TotalCapacity / 1024 / 1024):F2} GB",
                         LastLoginDate = DateTime.Now,
                         IsSelected = false
                     });

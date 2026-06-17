@@ -93,8 +93,8 @@ namespace overcloud.Views
             // “All” 필터일 때 전체 합계 행 추가
             if (filter == "All")
             {
-                ulong totalSum = (ulong)grouped.Sum(g => g.Total);
-                ulong usedSum = (ulong)grouped.Sum(g => g.Used);
+                double totalSum = grouped.Sum(g => g.Total);
+                double usedSum = grouped.Sum(g => g.Used);
                 items.Insert(0, new UsageItemViewModel
                 {
                     DriveName = "Total",
