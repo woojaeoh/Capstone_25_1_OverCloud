@@ -1,11 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Packaging;
 using System.Threading.Tasks;
 using DB.overcloud.Models;
 using DB.overcloud.Repository;
-using overcloud;
 using OverCloud.Services.FileManager.DriveManager;
 
 namespace OverCloud.Services.FileManager

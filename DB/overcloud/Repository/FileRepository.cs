@@ -163,6 +163,71 @@ namespace DB.overcloud.Repository
             return result;
         }
 
+        public List<CloudFileInfo> all_file_list_paged(int fileId, string user_id, int lastFileId, int pageSize)
+        {
+            var result = new List<CloudFileInfo>();
+
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            string query = @"
+                SELECT * FROM CloudFileInfo USE INDEX (idx_folder_user_fileid)
+                WHERE parent_folder_id = @fileId
+                AND ID = @user_id
+                AND file_id > @lastFileId
+                ORDER BY file_id
+                LIMIT @pageSize;";
+
+            using var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@fileId", fileId);
+            cmd.Parameters.AddWithValue("@user_id", user_id);
+            cmd.Parameters.AddWithValue("@lastFileId", lastFileId);
+            cmd.Parameters.AddWithValue("@pageSize", pageSize);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(new CloudFileInfo
+                {
+                    FileId = Convert.ToInt32(reader["file_id"]),
+                    FileName = reader["file_name"].ToString(),
+                    FileSize = Convert.ToUInt32(reader["file_size"]),
+                    UploadedAt = Convert.ToDateTime(reader["uploaded_at"]),
+                    CloudStorageNum = Convert.ToInt32(reader["cloud_storage_num"]),
+                    ID = reader["ID"].ToString(),
+                    ParentFolderId = Convert.ToInt32(reader["parent_folder_id"]),
+                    IsFolder = Convert.ToBoolean(reader["is_folder"]),
+                    CloudFileId = reader["cloud_file_id"]?.ToString(),
+                    RootFileId = reader["root_file_id"] is DBNull ? null : Convert.ToInt32(reader["root_file_id"]),
+                    ChunkIndex = reader["chunk_index"] is DBNull ? null : Convert.ToInt32(reader["chunk_index"]),
+                    ChunkSize = reader["chunk_size"] is DBNull ? null : Convert.ToUInt64(reader["chunk_size"]),
+                    IsDistributed = Convert.ToBoolean(reader["is_distributed"])
+                });
+            }
+
+            return result;
+        }
+
+        public List<CloudFileInfo> all_file_list_full(int fileId, string user_id)
+        {
+            const int pageSize = 1000;
+            var result = new List<CloudFileInfo>();
+            int lastFileId = 0;
+
+            while (true)
+            {
+                var page = all_file_list_paged(fileId, user_id, lastFileId, pageSize);
+                if (page.Count == 0) break;
+
+                result.AddRange(page);
+                lastFileId = page[page.Count - 1].FileId;
+
+                if (page.Count < pageSize) break;
+            }
+
+            return result;
+        }
+
         public CloudFileInfo specific_file_info(int fileId)
         {
             using var conn = new MySqlConnection(connectionString);

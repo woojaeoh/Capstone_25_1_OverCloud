@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using DB.overcloud.Models;
 using DB.overcloud.Repository;
 using OverCloud.Services.FileManager.DriveManager;
-using overcloud.Views;
 
 namespace OverCloud.Services
 {

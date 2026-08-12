@@ -6,11 +6,9 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DB.overcloud.Models;
 using DB.overcloud.Repository;
-using overcloud;
 using OverCloud.Services.FileManager;
 using OverCloud.Services.FileManager.DriveManager;
 using OverCloud.Services.StorageManager;
-using OverCloud.transfer_manager;
 
 namespace OverCloud.Services
 {
@@ -36,10 +34,12 @@ namespace OverCloud.Services
 
         public IFileIssueMappingRepository FileIssueMappingRepository { get; }
 
+        public LanTransferService LanTransferService { get; }
+
         public string user_id;
 
-        public LoginController() {
-            var connStr = DbConfig.ConnectionString;
+        public LoginController(string connectionString) {
+            var connStr = connectionString;
             var storageRepo = new StorageRepository(connStr);
 
             AccountRepository = new AccountRepository(connStr);
@@ -69,6 +69,7 @@ namespace OverCloud.Services
             FileIssueRepository = new FileIssueRepository(connStr);
             FileIssueMappingRepository = new FileIssueMappingRepository(connStr);
 
+            LanTransferService = new LanTransferService(AccountRepository);
         }
 
     }

@@ -59,8 +59,8 @@ namespace OverCloud.Services.FileManager.DriveManager
 
             try
             {
-                var fileBytes = await File.ReadAllBytesAsync(filePath);
-                var content = new ByteArrayContent(fileBytes);
+                using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+                var content = new StreamContent(fileStream);
                 content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
 
                 var request = new HttpRequestMessage(HttpMethod.Post, "https://content.dropboxapi.com/2/files/upload")

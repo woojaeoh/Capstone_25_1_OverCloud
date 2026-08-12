@@ -3,13 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using System.Windows;
 using DB.overcloud.Models;
 using System.IO;
 using DB.overcloud.Repository;
-using overcloud;
 using OverCloud.Services.FileManager.DriveManager;
 using OverCloud.Services.StorageManager;
+using System.Diagnostics;
 
 
 
@@ -135,6 +134,8 @@ namespace OverCloud.Services.FileManager
                 int read = await source.ReadAsync(buffer, 0, buffer.Length);
                 if (read == 0) break;
 
+                Console.WriteLine($"[{userId}/{fileName}/chunk{chunkIndex}] 버퍼 할당 후 — 힙: {GC.GetTotalMemory(false) / 1024 / 1024}MB / 피크: {Process.GetCurrentProcess().PeakWorkingSet64 / 1024 / 1024}MB");
+
                 // 서비스 찾기
                 var service = cloudServices.FirstOrDefault(s => s.GetType().Name.Contains(cloud.CloudType));
                 if (service == null)
@@ -151,6 +152,9 @@ namespace OverCloud.Services.FileManager
                 await File.WriteAllBytesAsync(tempFile, buffer); //버퍼 크기만큼(분산저장 chunk크기만큼) 잘라서 파일 쓰기.
                 string cloudFileId = await service.UploadFileAsync(cloud, tempFile, userId); // 잘린 파일 업로드
                 File.Delete(tempFile); //업로드 후 로컬에서 파일 삭제.
+
+                Console.WriteLine($"[{userId}/{fileName}/chunk{chunkIndex}] 업로드 완료 후 — 힙: {GC.GetTotalMemory(false) / 1024 / 1024}MB / 피크: {Process.GetCurrentProcess().PeakWorkingSet64 / 1024 / 1024}MB");
+
 
                 // 조각 파일 등록
                 CloudFileInfo chunk = new CloudFileInfo

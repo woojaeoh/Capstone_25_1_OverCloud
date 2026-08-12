@@ -246,7 +246,20 @@ namespace overcloud.Views
                 {
                     string rootPath = folderDialog.SelectedPath;
 
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
                     await CollectAllFilesFromFolder(rootPath, currentFolderId);  // 리스트 반환 X, 내부에서 큐 등록됨
+
+                    var waitTask = App.TransferManager.UploadManager.WaitForAllUploadsAsync();
+                    var timeoutTask = Task.Delay(TimeSpan.FromMinutes(2));
+                    var completedTask = await Task.WhenAny(waitTask, timeoutTask);
+
+                    sw.Stop();
+                    long peakMB = System.Diagnostics.Process.GetCurrentProcess().PeakWorkingSet64 / 1024 / 1024;
+
+                    if (completedTask == timeoutTask)
+                        Console.WriteLine($"[BENCH] ⚠️ 2분 타임아웃 — 행 의심. 경과 시간: {sw.ElapsedMilliseconds}ms / 그 시점 피크: {peakMB}MB");
+                    else
+                        Console.WriteLine($"[BENCH] 전체 완료 시간: {sw.ElapsedMilliseconds}ms / 최종 피크: {peakMB}MB");
 
                     LoadFolderContents(currentFolderId);
                     RefreshExplorer();

@@ -9,5 +9,8 @@ namespace DB.overcloud.Repository
         bool UpdateAccountUsage(string ID, ulong totalSize, ulong usedSize);
         bool assign_overcloud(string ID, string password, string salt);
         string login_overcloud(string ID, string password);
+
+        bool UpdateOnlineStatus(string userId, string localIp, bool isOnline);
+        string GetLocalIp(string targetUserId);
     }
 }

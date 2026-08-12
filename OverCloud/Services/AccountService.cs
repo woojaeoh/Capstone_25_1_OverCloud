@@ -5,8 +5,6 @@ using System.Text;
 using System.Threading.Tasks;
 using DB.overcloud.Models;
 using DB.overcloud.Repository;
-using DB.overcloud.Models;
-using overcloud;
 using MySqlX.XDevAPI;
 using System.Security.AccessControl;
 using OverCloud.Services.FileManager.DriveManager;
@@ -109,14 +107,13 @@ namespace OverCloud.Services
                 bool redistributionResult = await quotaManager.AccountFile_Redistribution(target.CloudStorageNum, userId);
                 if (!redistributionResult)
                 {
-                    System.Windows.MessageBox.Show("계정에 존재하는 파일 재분배 실패");
                     Console.WriteLine("❌ 파일 재분배 실패로 삭제 중단");
                     return false;
                 }
             }
             else
             {
-                System.Windows.MessageBox.Show("파일을 재분배할 수 없습니다");
+                Console.WriteLine("❌ 파일을 재분배할 공간이 부족합니다");
                 return false;
             }
 

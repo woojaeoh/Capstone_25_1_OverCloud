@@ -6,7 +6,6 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DB.overcloud.Models;
 using DB.overcloud.Repository;
-using overcloud;
 using OverCloud.Services.FileManager.DriveManager;
 
 namespace OverCloud.Services.StorageManager
@@ -103,40 +102,20 @@ namespace OverCloud.Services.StorageManager
 
 
 
-        //업로드 or 삭제 시 스토리지 용량 최신화.
+        // [Lost Update 방지] 업로드/삭제 시 용량 갱신
+        // 기존 방식: 메모리에서 절댓값 읽기 → 수정 → DB에 덮어쓰기
+        //   → 동시 업로드 시 두 스레드가 같은 초기값을 읽어 한쪽 변경이 소실됨
+        // 변경 방식: delta를 메모리/DB에 직접 누적
+        //   메모리: lock으로 직렬화된 AdjustUsedCapacity
+        //   DB:     used_capacity = used_capacity + @delta (원자적 연산)
         public void UpdateQuotaAfterUploadOrDelete(int cloudStorageNum, ulong fileSizeKB, bool isUpload, string userId)
         {
-            var quota = StorageSessionManager.Quotas.FirstOrDefault(q => q.CloudStorageNum == cloudStorageNum);
-            Console.WriteLine($" 업로드 or 삭제 반영 전: quota.Total = {quota.TotalCapacityKB}");
-            Console.WriteLine($" 업로드 or 삭제 반영 전: quota.Used = {quota.UsedCapacityKB}");
-            if (quota == null)
-            {
-                Console.WriteLine($"❌ quota not found for CloudStorageNum: {cloudStorageNum}");
-                return;
-            }
+            long deltaKB = isUpload ? (long)fileSizeKB : -(long)fileSizeKB;
 
-            if (isUpload)
-                quota.UsedCapacityKB += fileSizeKB;
-            else
-                quota.UsedCapacityKB -= fileSizeKB;
+            StorageSessionManager.AdjustUsedCapacity(cloudStorageNum, deltaKB);
 
-
-            Console.WriteLine($" 업로드 or 삭제 반영 후: quota.Used = {quota.UsedCapacityKB}");
-
-            var oneCloud = storageRepository.GetCloud(cloudStorageNum, userId);
-
-            var cloudInfo = new CloudStorageInfo
-            {
-                CloudStorageNum = quota.CloudStorageNum,
-                TotalCapacity = quota.TotalCapacityKB,
-                UsedCapacity = quota.UsedCapacityKB,
-                ID =userId
-              
-            };
-
-            bool dbResult = storageRepository.account_save(cloudInfo);
+            bool dbResult = storageRepository.IncrementUsedCapacity(cloudStorageNum, userId, deltaKB);
             Console.WriteLine(dbResult ? "✅ DB 저장 성공" : "❌ DB 저장 실패");
-
         }
 
 

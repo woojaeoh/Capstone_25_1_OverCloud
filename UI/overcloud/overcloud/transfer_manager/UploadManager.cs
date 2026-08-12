@@ -19,6 +19,11 @@ namespace OverCloud.transfer_manager
         private readonly FileUploadManager _fileUploadManager;
         private readonly CloudTierManager _cloudTierManager;
 
+        private int _pendingCount = 0;
+        private TaskCompletionSource<bool> _allDoneTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        
+        public Task WaitForAllUploadsAsync() => _allDoneTcs.Task;
+
         public ObservableCollection<TransferItemViewModel> Uploads => _uploads;
 
         public UploadManager(FileUploadManager fileUploadManager, CloudTierManager cloudTierManager)
@@ -32,6 +37,9 @@ namespace OverCloud.transfer_manager
         // ✅ 시그니처 유지, 클래스 수정 안함
         public void EnqueueUploads(List<(string FileName, string FilePath, int ParentFolderId)> files, string user_id)
         {
+            if (_pendingCount == 0)
+                _allDoneTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
             foreach (var file in files)
             {
                 var item = new TransferItemViewModel
@@ -51,6 +59,7 @@ namespace OverCloud.transfer_manager
                     FolderId = file.ParentFolderId
                 };
 
+                Interlocked.Increment(ref _pendingCount);
                 _queue.Add((item, taskInfo, user_id));
             }
         }
@@ -118,6 +127,8 @@ namespace OverCloud.transfer_manager
             finally
             {
                 _semaphore.Release();
+                if (Interlocked.Decrement(ref _pendingCount) == 0)
+                    _allDoneTcs.TrySetResult(true);
             }
         }
 

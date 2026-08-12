@@ -39,7 +39,7 @@ namespace overcloud
                 StartPipeServer();
                 ParseArgs(e.Args);
 
-                _controller = new LoginController();
+                _controller = new LoginController(DbConfig.ConnectionString);
                 var loginWindow = new overcloud.Views.LoginWindow(_controller);
                 loginWindow.Show();
             }
@@ -109,7 +109,7 @@ namespace overcloud
                 while (true)
                 {
                     try
-                    {
+                    {   
                         using (var server = new NamedPipeServerStream(
                             PipeName,
                             PipeDirection.In,

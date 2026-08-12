@@ -153,6 +153,36 @@ namespace DB.overcloud.Repository
             return result != null ? result.ToString() : null;
         }
 
+        // 로그인 시: localIp 저장 + is_online=1
+        // 앱 종료 시: localIp=NULL + is_online=0
+        public bool UpdateOnlineStatus(string userId, string localIp, bool isOnline)
+        {
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            string query = "UPDATE Account SET local_ip = @ip, is_online = @online WHERE ID = @id";
+            using var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@ip", isOnline ? (object)localIp : DBNull.Value);
+            cmd.Parameters.AddWithValue("@online", isOnline ? 1 : 0);
+            cmd.Parameters.AddWithValue("@id", userId);
+
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        // is_online=1인 상대방의 IP 반환. 오프라인이면 null
+        public string GetLocalIp(string targetUserId)
+        {
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            string query = "SELECT local_ip FROM Account WHERE ID = @id AND is_online = 1 LIMIT 1";
+            using var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@id", targetUserId);
+
+            var result = cmd.ExecuteScalar();
+            return result != null && result != DBNull.Value ? result.ToString() : null;
+        }
+
 
     }
 }

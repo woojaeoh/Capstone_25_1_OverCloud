@@ -405,3 +405,8 @@ temp_class/
 
 # ignore json
 *.json
+
+# Stray/test files
+UI/overcloud/overcloud/readclaude.txt
+UI/overcloud/overcloud/TextFile1.txt
+nul

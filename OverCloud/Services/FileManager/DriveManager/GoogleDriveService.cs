@@ -156,7 +156,7 @@ namespace OverCloud.Services.FileManager.DriveManager
 
         // 토큰 기반으로 DriveService에 인증 설정하는 HttpClientFactory
         // AccessToken 기반 HttpClientFactory
-        private class AccessTokenHttpClientFactory : IHttpClientFactory
+        private class AccessTokenHttpClientFactory : Google.Apis.Http.IHttpClientFactory
         {
             private readonly string accessToken;
 
