@@ -32,4 +32,11 @@ app.MapGet("/api/accounts/{userId}", (string userId, IAccountRepository accountR
     return Results.Ok(accounts);
 });
 
+// async 전환 샘플 엔드포인트 — GetAllAccountsAsync 호출 경로 확인용 (5.7 참고)
+app.MapGet("/api/accounts/{userId}/async", async (string userId, IAccountRepository accountRepository) =>
+{
+    var accounts = await accountRepository.GetAllAccountsAsync(userId);
+    return Results.Ok(accounts);
+});
+
 app.Run();

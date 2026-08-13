@@ -49,6 +49,41 @@ namespace DB.overcloud.Repository
             return result;
         }
 
+        // async 전환 샘플 — GetAllAccounts와 동일한 쿼리, 커넥션/리더만 비동기 API로 교체.
+        // 나머지 메서드는 아직 동기 그대로이며, 이 패턴이 검토를 통과하면 전체로 확산 예정.
+        public async Task<List<CloudStorageInfo>> GetAllAccountsAsync(string ID)
+        {
+            var result = new List<CloudStorageInfo>();
+
+            using var conn = new MySqlConnection(connectionString);
+            await conn.OpenAsync();
+
+            string storageQuery = "SELECT * FROM CloudStorageInfo WHERE ID = @id AND cloud_storage_num != -1";
+
+            using var cmd = new MySqlCommand(storageQuery, conn);
+            cmd.Parameters.AddWithValue("@id", ID);
+
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                result.Add(new CloudStorageInfo
+                {
+                    CloudStorageNum = Convert.ToInt32(reader["cloud_storage_num"]),
+                    ID = reader["ID"].ToString(),
+                    CloudType = reader["cloud_type"].ToString(),
+                    AccountId = reader["account_id"].ToString(),
+                    AccountPassword = reader["account_password"].ToString(),
+                    TotalCapacity = reader["total_capacity"] != DBNull.Value ? Convert.ToUInt64(reader["total_capacity"]) : 0,
+                    UsedCapacity = reader["used_capacity"] != DBNull.Value ? Convert.ToUInt64(reader["used_capacity"]) : 0,
+                    RefreshToken = reader["refresh_token"]?.ToString(),
+                    ClientId = reader["client_id"]?.ToString(),
+                    ClientSecret = reader["client_secret"]?.ToString()
+                });
+            }
+
+            return result;
+        }
+
         public bool DeleteAccountById(string ID)
         {
             using var conn = new MySqlConnection(connectionString);
