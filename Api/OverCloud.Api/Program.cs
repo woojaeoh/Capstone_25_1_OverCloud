@@ -5,6 +5,7 @@ using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using OverCloud.Api.Auth;
 using OverCloud.Services;
+using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,7 +20,24 @@ builder.Services.AddSingleton<IAccountRepository>(_ => new AccountRepository(con
 builder.Services.AddSingleton<JwtTokenService>();
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    // Swagger UI 우측 상단에 Authorize(자물쇠) 버튼을 띄우기 위한 Bearer 스킴 등록.
+    // 이게 없으면 JwtBearer 미들웨어는 정상 동작해도 Swagger가 그 사실을 몰라 버튼 자체가 안 생긴다.
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "Bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "로그인 응답의 accessToken 값만 입력하면 됨 (앞에 \"Bearer \" 안 붙여도 Swagger가 자동으로 붙여줌)"
+    });
+    options.AddSecurityRequirement(document => new OpenApiSecurityRequirement
+    {
+        [new OpenApiSecuritySchemeReference("Bearer", document)] = new List<string>()
+    });
+});
 
 // JWT 정책: docs/3TIER_ARCHITECTURE.md 5.5 — access token은 신원 증명 용도로만, TTL 짧게.
 // Jwt:Key는 환경변수(Jwt__Key)로만 주입 — connectionString과 동일한 이유로 코드/설정 파일에 하드코딩 금지.
@@ -31,6 +49,9 @@ var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "OverCloud.Client";
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        // 기본값(true)이면 검증 후 "sub" 클레임이 ClaimTypes.NameIdentifier로 자동 리매핑돼서
+        // FindFirstValue(JwtRegisteredClaimNames.Sub)가 항상 null을 반환한다 — 반드시 꺼야 함.
+        options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
