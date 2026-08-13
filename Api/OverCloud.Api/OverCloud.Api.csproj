@@ -12,6 +12,7 @@
     <PackageReference Include="Google.Apis.Auth" Version="1.69.0" />
     <PackageReference Include="Google.Apis.Core" Version="1.69.0" />
     <PackageReference Include="Google.Apis.Drive.v3" Version="1.69.0.3703" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.0" />
     <PackageReference Include="Microsoft.Identity.Client" Version="4.71.1" />
     <PackageReference Include="MySql.Data" Version="9.2.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.3" />

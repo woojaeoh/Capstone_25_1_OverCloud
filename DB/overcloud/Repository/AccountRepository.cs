@@ -218,6 +218,50 @@ namespace DB.overcloud.Repository
             return result != null && result != DBNull.Value ? result.ToString() : null;
         }
 
+        // 로그인/refresh 시 발급한 refresh token의 해시 저장 (사용자당 1개, 갱신 시 덮어씀)
+        public bool SaveRefreshToken(string userId, string refreshTokenHash, DateTime expiry)
+        {
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            string query = "UPDATE Account SET refresh_token_hash = @hash, refresh_token_expiry = @expiry WHERE ID = @id";
+            using var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@hash", refreshTokenHash);
+            cmd.Parameters.AddWithValue("@expiry", expiry);
+            cmd.Parameters.AddWithValue("@id", userId);
+
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        public (string? hash, DateTime? expiry) GetRefreshTokenInfo(string userId)
+        {
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            string query = "SELECT refresh_token_hash, refresh_token_expiry FROM Account WHERE ID = @id LIMIT 1";
+            using var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@id", userId);
+
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return (null, null);
+
+            string? hash = reader["refresh_token_hash"] != DBNull.Value ? reader["refresh_token_hash"].ToString() : null;
+            DateTime? expiry = reader["refresh_token_expiry"] != DBNull.Value ? Convert.ToDateTime(reader["refresh_token_expiry"]) : null;
+            return (hash, expiry);
+        }
+
+        // 로그아웃/계정정지 시 재로그인 없이는 즉시 refresh 불가능하도록 무효화
+        public bool RevokeRefreshToken(string userId)
+        {
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            string query = "UPDATE Account SET refresh_token_hash = NULL, refresh_token_expiry = NULL WHERE ID = @id";
+            using var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@id", userId);
+
+            return cmd.ExecuteNonQuery() > 0;
+        }
 
     }
 }
