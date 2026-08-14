@@ -103,8 +103,9 @@ app.MapPost("/api/auth/login", (LoginRequest req, IAccountRepository accountRepo
     return Results.Ok(new AuthResponse(accessToken, refreshToken, refreshExpiry));
 });
 
-// refresh: DB에 저장된 해시와 대조 후 access token만 재발급한다 (refresh token 자체는 로테이션하지 않음 —
-// 로테이션/동시 refresh 정책은 5.7에서 다룰 후속 논의 대상).
+// refresh: DB에 저장된 해시와 대조 후 access token과 refresh token을 모두 재발급한다(rotation).
+// 매 refresh마다 이전 refresh token 해시는 새 값으로 덮어써지므로, 탈취된 토큰이 재사용되면
+// 정상 사용자가 먼저 refresh한 시점부터 값이 어긋나 다음 요청부터 거부된다.
 app.MapPost("/api/auth/refresh", (RefreshRequest req, IAccountRepository accountRepository, JwtTokenService jwt) =>
 {
     var (storedHash, expiry) = accountRepository.GetRefreshTokenInfo(req.UserId);
@@ -116,8 +117,23 @@ app.MapPost("/api/auth/refresh", (RefreshRequest req, IAccountRepository account
         return Results.Unauthorized();
 
     var accessToken = jwt.IssueAccessToken(req.UserId);
-    return Results.Ok(new { accessToken });
+    var (newRefreshToken, newRefreshHash, newRefreshExpiry) = jwt.IssueRefreshToken();
+    accountRepository.SaveRefreshToken(req.UserId, newRefreshHash, newRefreshExpiry);
+
+    return Results.Ok(new AuthResponse(accessToken, newRefreshToken, newRefreshExpiry));
 });
+
+// 로그아웃: DB에 저장된 refresh token 해시를 지워서 이후 refresh를 막는다.
+// access token 자체는 stateless라 즉시 무효화는 불가 — TTL(기본 20분)이 지나야 완전히 끝난다 (5.5 참고).
+app.MapPost("/api/auth/logout", (ClaimsPrincipal user, IAccountRepository accountRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    accountRepository.RevokeRefreshToken(sub);
+    return Results.NoContent();
+}).RequireAuthorization();
 
 // Phase 1 스켈레톤 확인용으로 만든 엔드포인트 — 이제 인증을 요구하고, IDOR 방지를 위해
 // 토큰의 sub(로그인한 본인)와 route의 userId가 일치하는 경우만 허용한다 (8절 리스크 참고).

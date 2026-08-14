@@ -200,7 +200,10 @@ JWT는 무상태(stateless)라 발급 후에는 서버가 개입해 즉시 무�
 ## 7. 마이그레이션 단계
 
 - [ ] **Phase 1 — API 서버 뼈대**: ASP.NET Core Web API 프로젝트 생성, `DB/overcloud/Repository`·`OverCloud/Services` 이관, `LoginController`를 DI 등록으로 전환
-- [ ] **Phase 2 — 인증 계층**: 로그인 API + JWT 발급/검증 미들웨어 추가
+- [x] **Phase 2 — 인증 계층**: 로그인 API + JWT 발급/검증 미들웨어 추가
+  - [x] `/api/auth/login`, `/api/auth/refresh`(refresh token rotation 포함), `/api/auth/logout`
+  - [x] 보호된 엔드포인트에 `[Authorize]` + IDOR 체크(sub == route userId)
+  - [ ] 정지 계정 매 요청 DB 재확인(5.5) — **의도적으로 미룸**: 계정을 정지시킬 관리자 수단(API/DB) 자체가 아직 없어서 지금 만들어도 검증 불가. Phase 3/4에서 관리 기능이 생길 때 함께 설계 예정
 - [ ] **Phase 3 — OAuth 시크릿 이관**: 3개 Auth Helper를 서버 API로 이동, access-token 발급 엔드포인트 구현
 - [ ] **Phase 4 — 클라이언트 리팩토링**: `DbConfig.cs`/직접 DB 접속 코드 제거, `LanTransferService`의 DB 직접 조회를 `presence` API 호출로 교체, API 클라이언트로 교체, 로그인/토큰 발급 흐름 변경
   - ⚠️ 이 Phase부터는 신규 API 서버 없이는 클라이언트가 아예 동작하지 않는다 (빅뱅 전환). 아래 롤백 계획을 먼저 준비한 뒤 배포할 것.
