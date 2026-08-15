@@ -55,6 +55,10 @@ namespace overcloud
             // 앱 종료 시 온라인 상태 해제 + LAN 서버 종료
             if (_controller?.user_id != null)
             {
+                // presence API도 best-effort로 시도 — 종료 흐름을 API 응답까지 기다리게 하면
+                // 서버가 안 떠있을 때 앱 종료가 지연될 수 있어 대기하지 않는다.
+                // DB 직접 갱신은 그대로 남겨 항상 온라인 상태가 해제되도록 보장한다.
+                _ = OverCloud.Services.OverCloudApiClient.UpdatePresenceAsync(null, false);
                 _controller.AccountRepository.UpdateOnlineStatus(_controller.user_id, null, false);
                 _controller.LanTransferService.StopListening();
             }

@@ -12,10 +12,10 @@ namespace OverCloud.transfer_manager
         public UploadManager UploadManager { get; }
         public ObservableCollection<TransferItemViewModel> Completed { get; }
 
-        public TransferManager(FileUploadManager fileUploadManager, FileDownloadManager fileDownloadManager, CloudTierManager cloudTierManager)
+        public TransferManager(FileUploadManager fileUploadManager, FileDownloadManager fileDownloadManager)
         {
             DownloadManager = new DownloadManager(fileDownloadManager);
-            UploadManager = new UploadManager(fileUploadManager, cloudTierManager);
+            UploadManager = new UploadManager(fileUploadManager);
             Completed = new ObservableCollection<TransferItemViewModel>();
         }
     }

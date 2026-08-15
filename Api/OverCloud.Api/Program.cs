@@ -1,10 +1,13 @@
 using System.Security.Claims;
+using DB.overcloud.Models;
 using DB.overcloud.Repository;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using OverCloud.Api.Auth;
 using OverCloud.Services;
+using OverCloud.Services.FileManager.DriveManager;
+using OverCloud.Services.StorageManager;
 using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -18,10 +21,22 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
 
 builder.Services.AddSingleton<IAccountRepository>(_ => new AccountRepository(connectionString));
 builder.Services.AddSingleton<IStorageRepository>(_ => new StorageRepository(connectionString));
+builder.Services.AddSingleton<IFileRepository>(_ => new FileRepository(connectionString));
+builder.Services.AddSingleton<ICoopUserRepository>(_ => new CoopUserRepository(connectionString));
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<GoogleOAuthService>();
 builder.Services.AddSingleton<OneDriveOAuthService>();
+
+// Phase 4 — /api/files에 필요한 서비스. 5.1(서버 프록시 안 함) 결정에 따라 실제 클라우드 API 호출
+// (GoogleDriveService/OneDriveService 등 ICloudFileService 구현체, FileUploadManager 등)은 서버에
+// 전혀 두지 않는다 — 서버는 메타데이터(CloudFileInfo 행)와 할당량 숫자만 다룬다.
+// QuotaManager 생성자는 IEnumerable<ICloudFileService>를 요구하지만, 여기서 실제로 호출하는
+// UpdateQuotaAfterUploadOrDelete는 그 필드를 쓰지 않으므로(순수 DB 산술) 빈 리스트로 충분하다 —
+// SaveDriveQuotaToDB처럼 그 필드를 쓰는 다른 메서드는 서버에서 호출하지 않는다.
+builder.Services.AddSingleton<IEnumerable<ICloudFileService>>(new List<ICloudFileService>());
+builder.Services.AddSingleton<CloudTierManager>();
+builder.Services.AddSingleton<QuotaManager>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -162,6 +177,198 @@ app.MapGet("/api/accounts/{userId}/async", async (string userId, ClaimsPrincipal
     return Results.Ok(accounts);
 }).RequireAuthorization();
 
+// Phase 4(5.6) — LAN 전송 signaling: 클라이언트가 Account 테이블에 직접 UPDATE/SELECT하던
+// 온라인 상태·IP 조회를 API로 옮긴다. 갱신(POST)은 위조 방지를 위해 반드시 sub(본인)만 가능하고,
+// 조회(GET)는 P2P 특성상 원래도 다른 사용자의 LAN IP를 알아야 하므로 대상 제한을 두지 않는다
+// (로그인된 사용자라면 누구나 조회 가능 — 기존 GetLocalIp 동작과 동일, 새로 생긴 권한 아님).
+app.MapPost("/api/presence", (
+    PresenceUpdateRequest req,
+    ClaimsPrincipal user,
+    IAccountRepository accountRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    bool result = accountRepository.UpdateOnlineStatus(sub, req.IsOnline ? req.LocalIp : null, req.IsOnline);
+    return result ? Results.Ok() : Results.NotFound();
+}).RequireAuthorization();
+
+app.MapGet("/api/presence/{targetUserId}", (
+    string targetUserId,
+    IAccountRepository accountRepository) =>
+{
+    var localIp = accountRepository.GetLocalIp(targetUserId);
+    return localIp != null ? Results.Ok(new { localIp }) : Results.NotFound();
+}).RequireAuthorization();
+
+// Phase 4 — 할당량 조회: QuotaManager의 집계 로직(UpdateAggregatedStorageForUser 등)과 동일하게
+// "저장된 값을 합산"만 한다 — 클라우드 제공자에 실시간 조회(GetDriveQuotaAsync)는 하지 않음(느리고
+// 이번 엔드포인트의 책임이 아님, 그건 SaveDriveQuotaToDB 쪽 역할). AccountService/QuotaManager는
+// 이미 OverCloud.Api.csproj에 소스로 링크돼 있어(Phase 1) 새 DI 등록 없이 기존 IAccountRepository로 충분.
+// SYSTEM 더미 스토리지(cloud_storage_num=-1, AccountRepository.cs 계정 생성 시 자동 삽입)는 제외한다.
+//
+// 인가 범위: userId가 sub(본인) 자신이거나, sub가 userId(협업 계정)의 정당한 멤버(CoopUserInfo에
+// user_id=sub, coop_id=userId 행이 있음)인 경우까지 허용한다 — SharedAccountView가 자기 소유가 아닌
+// 협업 계정 ID로도 할당량을 조회해야 하기 때문(5.1/5.6과 같은 이유로 클라이언트 직접 DB 접속을 대체).
+// **신규 보안 체크**: 기존 클라이언트 DB 직접 경로(CloudTierManager.GetTotalRemainingQuotaInBytes)는
+// 이 멤버십을 전혀 확인하지 않고 클라이언트가 넘긴 accountId를 그대로 믿었다 — 단순 이관이 아니라
+// 여기서 처음으로 추가되는 검증이다.
+app.MapGet("/api/quota/{userId}", (string userId, ClaimsPrincipal user, IAccountRepository accountRepository, ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub != userId)
+    {
+        var coopIds = coopUserRepository.connected_cooperation_account_nums(sub);
+        if (!coopIds.Contains(userId))
+            return Results.Forbid();
+    }
+
+    var storages = accountRepository.GetAllAccounts(userId)
+        .Where(c => c.CloudType != "SYSTEM")
+        .Select(c => new
+        {
+            c.CloudStorageNum,
+            c.CloudType,
+            c.AccountId,
+            TotalCapacityKB = c.TotalCapacity,
+            UsedCapacityKB = c.UsedCapacity
+        })
+        .ToList();
+
+    ulong totalKB = storages.Aggregate(0UL, (acc, s) => acc + s.TotalCapacityKB);
+    ulong usedKB = storages.Aggregate(0UL, (acc, s) => acc + s.UsedCapacityKB);
+
+    return Results.Ok(new { storages, totalCapacityKB = totalKB, usedCapacityKB = usedKB });
+}).RequireAuthorization();
+
+// Phase 4 — 파일 목록 조회: 특정 폴더(parentFolderId) 안의 파일/폴더 목록.
+// 최상위는 클라이언트 기존 관례와 동일하게 -1. all_file_list 쿼리 자체가 "WHERE ID = @user_id"로
+// 걸려있어(FileRepository.cs) 다른 사용자의 파일은 애초에 조회되지 않는다 — 이 IDOR은 리포지토리 계층에서 이미 막혀 있음.
+app.MapGet("/api/files/{parentFolderId:int}", (
+    int parentFolderId,
+    ClaimsPrincipal user,
+    IFileRepository fileRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var files = fileRepository.all_file_list(parentFolderId, sub);
+    return Results.Ok(files);
+}).RequireAuthorization();
+
+// Phase 4 — 스토리지 선택: 파일 크기(KB)를 넣으면 CloudTierManager의 기존 티어 로직(OneDrive>Google>Dropbox,
+// 동률이면 여유공간 많은 순)으로 업로드 대상 스토리지를 정해준다. 클라이언트는 이 응답의 CloudStorageNum으로
+// POST /api/oauth/{provider}/access-token을 호출해 access token을 받고, 그 토큰으로 클라우드 API를
+// "직접" 호출해 실제 바이트를 올린다(5.1 — 서버는 바이트를 중계하지 않는다).
+app.MapPost("/api/files/select-storage", (
+    SelectStorageRequest req,
+    ClaimsPrincipal user,
+    CloudTierManager cloudTierManager) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var best = cloudTierManager.SelectBestStorage(req.FileSizeKB, sub);
+    if (best == null)
+        return Results.Conflict(new { error = "저장 가능한 클라우드가 없습니다 (용량 부족)." });
+
+    return Results.Ok(new { best.CloudStorageNum, best.CloudType, best.AccountId });
+}).RequireAuthorization();
+
+// Phase 4 — 업로드 확정: 클라이언트가 클라우드에 바이트를 이미 올린 뒤(select-storage → access-token →
+// 클라우드 API 직접 호출), 그 결과(cloudFileId)를 알려주면 서버는 CloudFileInfo 행을 만들고 할당량만 갱신한다.
+// req.CloudStorageNum이 sub 소유인지 GetCloud로 먼저 확인해 남의 스토리지 번호로 메타데이터를 심는 것을 막는다.
+app.MapPost("/api/files/confirm-upload", (
+    ConfirmUploadRequest req,
+    ClaimsPrincipal user,
+    IStorageRepository storageRepository,
+    IFileRepository fileRepository,
+    QuotaManager quotaManager) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var cloud = storageRepository.GetCloud(req.CloudStorageNum, sub);
+    if (cloud == null)
+        return Results.Forbid();
+
+    var file = new CloudFileInfo
+    {
+        FileName = req.FileName,
+        FileSize = req.FileSizeKB,
+        UploadedAt = DateTime.Now,
+        CloudStorageNum = req.CloudStorageNum,
+        ParentFolderId = req.ParentFolderId,
+        IsFolder = false,
+        CloudFileId = req.CloudFileId,
+        ID = sub
+    };
+
+    int fileId = fileRepository.AddFileAndReturnId(file);
+    quotaManager.UpdateQuotaAfterUploadOrDelete(req.CloudStorageNum, req.FileSizeKB, true, sub);
+
+    return Results.Ok(new { fileId });
+}).RequireAuthorization();
+
+// Phase 4 — 다운로드 위치 조회: 서버는 바이트를 중계하지 않으므로(5.1), fileId 소유자를 확인한 뒤
+// 어느 클라우드의 어떤 파일인지(cloudStorageNum, cloudFileId)만 알려준다. 클라이언트가 이 값으로
+// access-token을 받아 클라우드 API에서 직접 바이트를 받는다.
+app.MapGet("/api/files/{fileId:int}/location", (
+    int fileId,
+    ClaimsPrincipal user,
+    IFileRepository fileRepository,
+    IStorageRepository storageRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var file = fileRepository.GetFileById(fileId);
+    if (file == null)
+        return Results.NotFound();
+    if (file.ID != sub)
+        return Results.Forbid();
+    if (file.IsFolder)
+        return Results.BadRequest(new { error = "폴더는 다운로드 대상이 아닙니다." });
+
+    // 클라이언트가 어느 제공자(Google/OneDrive) API를 호출해야 하는지 알아야 하므로 cloudType도 같이 내려준다.
+    var cloud = storageRepository.GetCloud(file.CloudStorageNum, sub);
+    if (cloud == null)
+        return Results.NotFound();
+
+    return Results.Ok(new { file.CloudStorageNum, cloud.CloudType, file.CloudFileId, file.FileName, file.FileSize });
+}).RequireAuthorization();
+
+// Phase 4 — 파일 삭제(메타데이터): 클라이언트가 클라우드 API로 실제 파일을 이미 지운 뒤 호출하는 게 계약이다
+// (업로드와 대칭 — 서버는 바이트를 만지지 않는다). 폴더는 원래 클라우드 측 삭제가 없는 논리 항목이라
+// 곧바로 DB 행만 지우면 된다. 소유자 확인 후 진행.
+app.MapDelete("/api/files/{fileId:int}", (
+    int fileId,
+    ClaimsPrincipal user,
+    IFileRepository fileRepository,
+    QuotaManager quotaManager) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var file = fileRepository.GetFileById(fileId);
+    if (file == null)
+        return Results.NotFound();
+    if (file.ID != sub)
+        return Results.Forbid();
+
+    bool dbDeleted = fileRepository.DeleteFile(fileId);
+    if (dbDeleted && !file.IsFolder)
+        quotaManager.UpdateQuotaAfterUploadOrDelete(file.CloudStorageNum, file.FileSize, false, sub);
+
+    return dbDeleted ? Results.NoContent() : Results.Problem("삭제 실패", statusCode: StatusCodes.Status500InternalServerError);
+}).RequireAuthorization();
+
 // Phase 3 — Google Drive access_token 발급: client_secret은 서버 설정에서만 읽고,
 // refresh_token은 GetCloud(cloudStorageNum, userId)로 "본인 소유 row"만 조회해 IDOR을 막는다
 // (WHERE cloud_storage_num=@num AND ID=@id 조건이 리포지토리 쿼리 안에 이미 있음).
@@ -229,3 +436,6 @@ record LoginRequest(string UserId, string Password);
 record RefreshRequest(string UserId, string RefreshToken);
 record AuthResponse(string AccessToken, string RefreshToken, DateTime RefreshTokenExpiry);
 record OAuthAccessTokenRequest(int CloudStorageNum);
+record PresenceUpdateRequest(string? LocalIp, bool IsOnline);
+record SelectStorageRequest(ulong FileSizeKB);
+record ConfirmUploadRequest(int CloudStorageNum, string CloudFileId, string FileName, ulong FileSizeKB, int ParentFolderId);

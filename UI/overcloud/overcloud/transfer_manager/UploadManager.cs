@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using OverCloud.Services;
 using overcloud.transfer_manager;
+using overcloud.CloudApi;
 using OverCloud.Services.FileManager;
 using overcloud;
 
@@ -17,19 +18,20 @@ namespace OverCloud.transfer_manager
         private readonly BlockingCollection<(TransferItemViewModel Item, UploadTaskInfo Task, string UserId)> _queue = new();
         private readonly SemaphoreSlim _semaphore = new(2);
         private readonly FileUploadManager _fileUploadManager;
-        private readonly CloudTierManager _cloudTierManager;
 
         private int _pendingCount = 0;
         private TaskCompletionSource<bool> _allDoneTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        
+
         public Task WaitForAllUploadsAsync() => _allDoneTcs.Task;
 
         public ObservableCollection<TransferItemViewModel> Uploads => _uploads;
 
-        public UploadManager(FileUploadManager fileUploadManager, CloudTierManager cloudTierManager)
+        // Phase 4 3단계(5.1) — 단일 파일 업로드는 CloudTierManager.SelectBestStorage(DB 직접 조회) 대신
+        // /api/files/select-storage로 대상 스토리지를 정하고, 클라이언트가 클라우드 API를 직접 호출한다.
+        // 분산 저장(Upload_Distributed)만 아직 미이관이라 FileUploadManager는 그 경로로만 남겨둔다.
+        public UploadManager(FileUploadManager fileUploadManager)
         {
             _fileUploadManager = fileUploadManager;
-            _cloudTierManager = cloudTierManager;
 
             Task.Run(ProcessQueue);
         }
@@ -96,10 +98,12 @@ namespace OverCloud.transfer_manager
                 });
 
                 ulong fileSize = (ulong)new FileInfo(file.LocalPath).Length;
-                var bestStorage = _cloudTierManager.SelectBestStorage(fileSize / 1024, userId);
+                var selected = await OverCloudApiClient.SelectStorageAsync(fileSize / 1024);
 
-                bool result = bestStorage != null
-                    ? await _fileUploadManager.file_upload(file.LocalPath, file.FolderId, userId)
+                // 단일 스토리지에 다 안 들어가면(select-storage가 null 반환) 분산 저장으로 폴백 —
+                // 이 경로는 아직 미이관이라 기존 DB 직접 접속 FileUploadManager를 그대로 쓴다.
+                bool result = selected != null
+                    ? await UploadViaCloudApiAsync(selected, file, userId)
                     : await _fileUploadManager.Upload_Distributed(file.LocalPath, file.FolderId, userId);
 
                 Console.WriteLine($"[MEM] [{file.FileName}] 완료 — 힙:{ManagedHeapMB()}MB  WorkingSet:{WorkingSetMB()}MB  (업로드 전 대비 힙 증가: {ManagedHeapMB() - heapBefore}MB)");
@@ -140,6 +144,38 @@ namespace OverCloud.transfer_manager
             }, user_id);
         }
 
+        // select-storage로 정해진 스토리지의 access token을 받아 클라우드 API를 직접 호출해 업로드한 뒤,
+        // 결과(cloudFileId)를 confirm-upload로 서버에 알려 메타데이터/할당량을 기록한다(5.1).
+        private static async Task<bool> UploadViaCloudApiAsync(SelectedStorage selected, UploadTaskInfo file, string userId)
+        {
+            string provider = selected.CloudType switch
+            {
+                "GoogleDrive" => "google",
+                "OneDrive" => "onedrive",
+                _ => null
+            };
+            if (provider == null)
+            {
+                Console.WriteLine($"❌ 지원되지 않는 클라우드: {selected.CloudType}");
+                return false;
+            }
 
+            var accessToken = await OverCloudApiClient.GetOAuthAccessTokenAsync(provider, selected.CloudStorageNum);
+            if (string.IsNullOrEmpty(accessToken))
+                return false;
+
+            string cloudFileId = provider == "google"
+                ? await GoogleDriveTokenClient.UploadAsync(accessToken, file.LocalPath)
+                : await OneDriveTokenClient.UploadAsync(accessToken, file.LocalPath);
+
+            if (string.IsNullOrEmpty(cloudFileId))
+                return false;
+
+            ulong fileSizeKB = (ulong)new FileInfo(file.LocalPath).Length / 1024;
+            var fileId = await OverCloudApiClient.ConfirmUploadAsync(
+                selected.CloudStorageNum, cloudFileId, Path.GetFileName(file.LocalPath), fileSizeKB, file.FolderId);
+
+            return fileId != null;
+        }
     }
 }

@@ -141,8 +141,10 @@ namespace OverCloud.Services
         // onProgress: 0~100 진행률 콜백 (UI 스레드에서 ViewModel에 연결)
         public async Task<bool> SendFileAsync(string targetUserId, string filePath, Action<int> onProgress)
         {
-            // 1. DB에서 상대 IP 조회
-            string targetIp = _accountRepository.GetLocalIp(targetUserId);
+            // 1. 상대 IP 조회 — presence API를 우선 시도하고(5.6), 로그인 안 됐거나 호출 실패 시
+            // 기존 DB 직접 조회로 폴백
+            string targetIp = await OverCloudApiClient.GetPresenceAsync(targetUserId)
+                ?? _accountRepository.GetLocalIp(targetUserId);
             if (targetIp == null)
             {
                 Console.WriteLine($"[LAN] {targetUserId} 오프라인 또는 같은 네트워크 아님");

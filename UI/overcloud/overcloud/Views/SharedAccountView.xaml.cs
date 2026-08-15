@@ -243,8 +243,14 @@ namespace overcloud.Views
                     string filePath = fileDialog.FileName;
                     ulong fileSize = (ulong)new FileInfo(filePath).Length;
 
-                    // 용량 체크
-                    ulong totalRemainingByte = _controller.CloudTierManager.GetTotalRemainingQuotaInBytes(_currentAccountId);
+                    // 용량 체크 (Phase 4 4단계 — GET /api/quota/{userId}는 sub==userId 외에
+                    // sub가 이 협업 계정(_currentAccountId)의 정당한 멤버인 경우도 허용하도록 넓혀둠)
+                    ulong? totalRemainingByte = await OverCloudApiClient.GetRemainingQuotaBytesAsync(_currentAccountId);
+                    if (totalRemainingByte == null)
+                    {
+                        System.Windows.MessageBox.Show("❌ 서버에서 용량 정보를 가져오지 못했습니다.");
+                        return;
+                    }
                     if (totalRemainingByte < fileSize)
                     {
                         System.Windows.MessageBox.Show("❌ 전체 클라우드 용량이 부족합니다.");

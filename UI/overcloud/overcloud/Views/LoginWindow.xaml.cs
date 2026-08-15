@@ -23,7 +23,7 @@ namespace overcloud.Views
             _controller = controller;
         }
 
-        private void LoginButton_Click(object sender, RoutedEventArgs e)
+        private async void LoginButton_Click(object sender, RoutedEventArgs e)
         {
             // 아이디, 비밀번호는 나중에 사용할 수 있도록 받아두기만 함
             string userId = IdBox.Text;
@@ -68,6 +68,10 @@ namespace overcloud.Views
             //var storages = new AccountRepository(DbConfig.ConnectionString).GetAllAccounts(userId);
             //StorageSessionManager.InitializeFromDatabase(storages);
 
+            // Phase 4 1단계: 신규 API 서버에도 병행으로 로그인해 JWT를 받아둔다.
+            // 실패해도(API 서버 미기동 등) 기존 로그인 흐름은 그대로 진행 — LoginAsync가 예외를 삼킴.
+            await OverCloud.Services.OverCloudApiClient.LoginAsync(userId, password);
+
             // 1. 계정 리스트 구성
             var allAccounts = new List<string> { userId };
             allAccounts.AddRange(_controller.CoopUserRepository.connected_cooperation_account_nums(userId));
@@ -84,13 +88,16 @@ namespace overcloud.Views
             StorageSessionManager.InitializeFromDatabase(allStorages);
 
 
-            App.TransferManager = new TransferManager(_controller.FileUploadManager, _controller.FileDownloadManager, _controller.CloudTierManager);
+            App.TransferManager = new TransferManager(_controller.FileUploadManager, _controller.FileDownloadManager);
 
             _controller.user_id = userId;
 
-            // LAN 전송: 현재 IP를 DB에 등록하고 수신 서버 시작
+            // LAN 전송: 현재 IP를 등록하고 수신 서버 시작.
+            // presence API를 우선 시도하고(5.6), 로그인 안 됐거나 호출 실패 시 기존 DB 직접 갱신으로 폴백.
             string localIp = OverCloud.Services.LanTransferService.GetLocalIp();
-            _controller.AccountRepository.UpdateOnlineStatus(userId, localIp, true);
+            bool presenceUpdated = await OverCloud.Services.OverCloudApiClient.UpdatePresenceAsync(localIp, true);
+            if (!presenceUpdated)
+                _controller.AccountRepository.UpdateOnlineStatus(userId, localIp, true);
             _controller.LanTransferService.StartListening();
 
             // MainWindow 실행

@@ -13,7 +13,7 @@ using OverCloud.Services.StorageManager;
 namespace OverCloud.Services
 {
     public class LoginController
-    {
+    { 
         public AccountService AccountService { get; }
         public FileUploadManager FileUploadManager { get; }
         public FileDownloadManager FileDownloadManager { get; }

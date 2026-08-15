@@ -86,7 +86,7 @@ flowchart LR
     UI -- "파일 바이트 업/다운로드<br/>(access_token 사용, 서버 경유 안 함)" --> Google
     UI --> OneDrive
     UI --> Dropbox
-```
+```권
 
 핵심 원칙: **DB 접속과 비밀 정보 관리는 서버로 옮기되, 대용량 파일 바이트 전송은 지금처럼 클라이언트 ↔ 클라우드 제공자 직접 경로를 유지한다.** (근거는 5.1 참고)
 
@@ -100,7 +100,7 @@ flowchart LR
 - 제거: `DbConfig.cs`의 connectionString, `MySqlConnection` 직접 생성 코드, `C:\key\*.json` 직접 로드 코드
 - 추가: API 서버 호출용 `HttpClient` 래퍼, JWT/세션 토큰 보관, 로그인 시 API 서버로부터 access_token 발급받는 흐름
 
-### 4.2 Application Tier — 신규 API 서버 (ASP.NET Core Web API 권장)
+### 4.2 Application Tier — 신규 API 서버 (ASP.NET Core Web API 장)
 
 기존 `OverCloud/Services/*`, `DB/overcloud/Repository/*`를 그대로 이 프로젝트로 이관한다 (코드가 이미 UI와 분리돼 있어 이식 자체는 크지 않음). `LoginController.cs`가 이미 사실상의 조립부(composition root) 역할을 하고 있으므로, 이를 ASP.NET Core의 DI 컨테이너 등록 코드로 변환하는 것이 자연스러운 시작점이다.
 
@@ -125,6 +125,8 @@ flowchart LR
 - 현재 `FileUploadManager.cs`는 클라이언트가 `service.UploadFileAsync(...)`로 Google/OneDrive/Dropbox에 직접 바이트를 전송한다.
 - 만약 API 서버가 파일 바이트까지 중계하면, 같은 데이터가 "클라이언트→API 서버→클라우드 제공자"로 두 번 왕복하게 되어 서버 대역폭 비용과 지연이 두 배로 늘어난다. 무료/저비용 클라우드로 재배포하는 상황에서는 이 비용이 특히 부담된다.
 - 따라서 서버는 **메타데이터(어느 계정에 얼마나 저장할지, 할당량 등)와 access_token 발급**만 담당하고, 실제 바이트는 지금처럼 클라이언트가 클라우드 제공자와 직접 주고받는다.
+
+**번복 이력**: `/api/files` 최초 구현(2026-08-15)에서 이 결정을 어기고 `POST /api/files/upload`/`GET /api/files/{fileId}/download`가 바이트를 직접 받고 돌려주는 서버 프록시 구조로 만들어졌다. 의도적인 재검토가 아니라, `FileUploadManager`/`FileDownloadManager`를 "이미 컴파일되는 코드니 그대로 재사용"하는 데만 집중하다 이 문서의 5.1 결정을 확인하지 않은 **실수**였다. 이후 같은 날 바로 원안대로 되돌림: 서버는 `POST /api/files/select-storage`(업로드 대상 스토리지 결정), `POST /api/files/confirm-upload`(업로드 완료 후 메타데이터 기록 + 할당량 갱신), `GET /api/files/{fileId}/location`(다운로드 전 어느 클라우드의 무슨 파일인지 조회), `DELETE /api/files/{fileId}`(클라이언트가 클라우드에서 이미 지운 뒤 메타데이터만 정리)로 메타데이터만 다루고, 클라이언트가 `POST /api/oauth/{provider}/access-token`으로 받은 토큰으로 클라우드 API를 직접 호출해 바이트를 주고받는다. `GoogleDriveService`/`OneDriveService`/`FileUploadManager`/`FileDownloadManager`/`FileDeleteManager`는 서버 DI에서 전부 제거했다 — 서버는 더 이상 클라우드 제공자에 직접 접속하지 않는다.
 
 ### 5.2 인증/인가 흐름
 
@@ -200,6 +202,8 @@ JWT는 무상태(stateless)라 발급 후에는 서버가 개입해 즉시 무�
 ## 7. 마이그레이션 단계
 
 - [ ] **Phase 1 — API 서버 뼈대**: ASP.NET Core Web API 프로젝트 생성, `DB/overcloud/Repository`·`OverCloud/Services` 이관, `LoginController`를 DI 등록으로 전환
+  - [x] 프로젝트 생성 + `OverCloud.Api.csproj`에서 `DB/overcloud`, `OverCloud/Services` 전체를 Link로 참조 — 파일을 옮기지 않고 소스를 공유해 `AccountService`/`QuotaManager`/`FileUploadManager` 등이 이미 API 프로젝트에서도 컴파일됨
+  - [ ] `LoginController`가 수동으로 조립하는 나머지 서비스(`FileUploadManager`, `CooperationManager` 등)를 DI 등록으로 전환 — 해당 서비스를 쓰는 엔드포인트를 추가할 때마다 점진적으로 진행
 - [x] **Phase 2 — 인증 계층**: 로그인 API + JWT 발급/검증 미들웨어 추가
   - [x] `/api/auth/login`, `/api/auth/refresh`(refresh token rotation 포함), `/api/auth/logout`
   - [x] 보호된 엔드포인트에 `[Authorize]` + IDOR 체크(sub == route userId)
@@ -207,10 +211,32 @@ JWT는 무상태(stateless)라 발급 후에는 서버가 개입해 즉시 무�
 - [ ] **Phase 3 — OAuth 시크릿 이관**: 3개 Auth Helper를 서버 API로 이동, access-token 발급 엔드포인트 구현
   - [x] Google: `POST /api/oauth/google/access-token` — client_secret은 서버 설정(`OAuth:Google:ClientSecret`)에서만 읽음, `GetCloud(cloudStorageNum, userId)`로 IDOR 방지, refresh token 만료/폐기(`invalid_grant`)는 401로 구분 응답 (테스트 완료: 정상 200, 만료 401 모두 확인)
   - [x] OneDrive: `POST /api/oauth/onedrive/access-token` — Google과 동일 패턴, `client_secret` 없이 `client_id`만 사용(public client), 공통 `OAuthRefreshTokenInvalidException`으로 401 구분 응답 (테스트 완료: 정상 200 확인). 계정 추가 시 캐시된 브라우저 세션이 자동 재사용되던 문제를 `prompt=select_account` 추가로 별도 수정
-  - [ ] Dropbox: 동일 패턴으로 access-token 엔드포인트 추가
+  - [ ] Dropbox: **의도적으로 보류** — 사용자별 OAuth 연동 흐름 자체가 없고(고정 공유 credential 파일에서 refresh_token을 읽는 구조), 이 구조적 한계를 그대로 둔 채 엔드포인트만 추가하는 게 의미가 없다고 판단해 별도 결정 전까지 미룸
   - [ ] 최초 계정 연동(authorization code → refresh_token 교환) 서버 이관 — Phase 4로 이월 (이번 라운드는 access-token 재발급만 범위)
 - [ ] **Phase 4 — 클라이언트 리팩토링**: `DbConfig.cs`/직접 DB 접속 코드 제거, `LanTransferService`의 DB 직접 조회를 `presence` API 호출로 교체, API 클라이언트로 교체, 로그인/토큰 발급 흐름 변경
-  - ⚠️ 이 Phase부터는 신규 API 서버 없이는 클라이언트가 아예 동작하지 않는다 (빅뱅 전환). 아래 롤백 계획을 먼저 준비한 뒤 배포할 것.
+  - [x] `OverCloud/Services/OverCloudApiClient.cs` 추가 — 클라이언트가 API 서버와 처음 통신을 시작하는 지점. 로그인 시 기존 DB 직접 인증과 병행으로 `POST /api/auth/login` 호출해 JWT 발급·보관 (API 서버 다운 시에도 기존 로그인은 그대로 동작하도록 예외를 내부에서 삼킴, 테스트 완료)
+  - [x] presence API(5.6) 연동 — `LoginWindow`(온라인 전환), `LanTransferService.SendFileAsync`(피어 IP 조회), `App.xaml.cs`(종료 시 오프라인 전환)에서 API 우선 시도 후 실패 시 기존 DB 직접 접속으로 폴백. DB 리포지토리 코드 자체는 그대로 남겨둬 언제든 되돌릴 수 있음 (테스트 완료)
+  - [x] `GET /api/quota/{userId}` 추가 — DB에 저장된 값을 합산만 함(클라우드 제공자 실시간 조회는 안 함), SYSTEM 더미 스토리지(-1) 제외
+  - [x] `/api/files` — 5.1(서버는 바이트를 중계하지 않는다) 원칙에 맞춰 메타데이터/할당량만 다룬다:
+    - `GET /api/files/{parentFolderId}` — 목록 조회(최상위 -1)
+    - `POST /api/files/select-storage` — 파일 크기(KB)를 넣으면 `CloudTierManager`의 기존 티어 로직으로 업로드 대상 스토리지 결정
+    - `POST /api/files/confirm-upload` — 클라이언트가 `select-storage`로 정해진 스토리지에 `/api/oauth/{provider}/access-token`으로 받은 토큰으로 클라우드 API를 **직접** 호출해 업로드를 마친 뒤, 그 결과(cloudFileId)를 알려주면 서버가 `CloudFileInfo` 행 생성 + 할당량 갱신만 함
+    - `GET /api/files/{fileId}/location` — 다운로드 전 소유자 확인 후 어느 클라우드의 무슨 파일인지(cloudStorageNum, cloudFileId)만 알려줌, 실제 바이트는 클라이언트가 클라우드에서 직접 받음
+    - `DELETE /api/files/{fileId}` — 클라이언트가 클라우드에서 이미 지운 뒤 메타데이터 행만 정리(업로드와 대칭 계약)
+    - 서버 DI에서 `GoogleDriveService`/`OneDriveService`/`FileUploadManager`/`FileDownloadManager`/`FileDeleteManager`를 전부 제거함 — 서버는 클라우드 제공자에 직접 접속하지 않는다. `QuotaManager`는 할당량 산술(`UpdateQuotaAfterUploadOrDelete`, DB 조회만 함)에만 쓰고 그 외 메서드는 호출하지 않음.
+    - fileId 소유자(`CloudFileInfo.ID`)가 sub와 다르면 403. 단일 파일만 우선 구현 — 분산 저장(`Upload_Distributed`/`DownloadAndMergeFile`/`Delete_DistributedFile`)은 아직 미이관.
+    - Dropbox는 여전히 제외 (위 Phase 3 결정과 동일 이유).
+    - **주의(미해결, 별도 확인 필요)**: 이번에 `FileDeleteManager.Delete_File`/`Delete_DistributedFile`과 `QuotaManager.AccountFile_Redistribution`(업로드 쪽) 코드를 다시 보다가 발견한 것 — 이미 DB에 저장된 `CloudFileInfo.FileSize`(이미 KB 단위)를 재사용해 `UpdateQuotaAfterUploadOrDelete`를 호출하는 자리에서 `file.FileSize / 1024`처럼 또 나누고 있어, 최초 업로드 때 계산한 델타(바이트→KB, 1회 나눔)와 단위가 안 맞는 것으로 보임. 삭제/재분배를 반복하면 추적된 사용량이 실제보다 점점 커지는 방향으로 드리프트할 수 있음 — 이번 `/api/files` 작업 범위 밖이라 건드리지 않았고, 새로 만든 `DELETE /api/files/{fileId}`는 `file.FileSize`를 그대로(추가로 나누지 않고) 넘기도록 짰음. 원본 클라이언트 코드 쪽은 별도로 확인 필요.
+  - [x] 클라이언트를 위 `/api/files` + `access-token` 조합으로 실제로 연결(5.1의 "클라이언트가 직접" 쪽 절반):
+    - `OverCloudApiClient`에 `GetOAuthAccessTokenAsync`/`SelectStorageAsync`/`ConfirmUploadAsync`/`GetFileLocationAsync`/`GetRemainingQuotaBytesAsync` 추가
+    - `UI/overcloud/overcloud/CloudApi/GoogleDriveTokenClient.cs`, `OneDriveTokenClient.cs` 신규 — 토큰만 받아 클라우드 API를 직접 호출하는 클라이언트 전용 클래스(API 서버 프로젝트로는 링크되지 않음). 기존 `OverCloud.Services.FileManager.DriveManager.GoogleDriveService`/`OneDriveService`를 그대로 재사용하지 않은 이유: 그 클래스들은 `storageRepo.GetCloud`(DB 직접 조회)와 `GoogleTokenProvider`/`OneDriveTokenRefresher`(로컬에서 `client_secret`으로 refresh_token 교환)에 묶여 있어, 재사용하면 겉보기엔 API로 옮긴 것 같아도 실제로는 DB 직접 접속과 시크릿 노출이 그대로 남는다
+    - `UploadManager.ProcessUpload`/`DownloadManager.ProcessDownload`가 `CloudTierManager.SelectBestStorage`(DB 직접) 대신 `select-storage`→`access-token`→토큰 클라이언트→`confirm-upload`/`location` 흐름을 탐 — **교체**이지 병행이 아니라서 API 서버가 꺼져 있으면 업/다운로드가 실패한다(의도된 동작, presence처럼 DB 폴백을 두지 않음). `CloudTierManager`는 `UploadManager`/`TransferManager`/`LoginWindow.xaml.cs` 생성자에서 완전히 제거됨. 분산 저장(`Upload_Distributed`/`DownloadAndMergeFile`)은 여전히 기존 `FileUploadManager`/`FileDownloadManager`(DB 직접) 경로로 남아있음 — 단일 파일만 이관됨
+    - `HomeView.xaml.cs`/`SharedAccountView.xaml.cs`의 업로드 전 용량 체크(`CloudTierManager.GetTotalRemainingQuotaInBytes`, DB 직접)도 `GET /api/quota/{userId}`로 교체
+    - **`GET /api/quota/{userId}` 인가 범위 확장 + 신규 보안 체크**: `SharedAccountView`가 조회하는 `_currentAccountId`는 로그인한 본인(sub)이 아니라 협업 계정 ID라서, 기존처럼 `sub == userId`만 허용하면 항상 403이 난다. 그래서 `sub == userId`이거나 `ICoopUserRepository.connected_cooperation_account_nums(sub)`에 `userId`가 포함된 경우(= sub가 그 협업 계정의 정당한 멤버)까지 허용하도록 넓힘. **주의**: 이건 단순 이관이 아니라 새로 추가된 검증이다 — 기존 클라이언트 DB 직접 경로(`CloudTierManager.GetTotalRemainingQuotaInBytes`)는 이 멤버십을 전혀 확인하지 않고 클라이언트가 넘긴 accountId를 그대로 신뢰하고 있었다. `ICoopUserRepository`/`CoopUserRepository`는 이미 Phase 1 소스 링크로 API 프로젝트에 들어와 있어 새 DI 등록만 추가함(새 파일 없음).
+  - [ ] 나머지 엔드포인트(`/api/coop/*`, `/api/issues/*`, 스토리지 추가/삭제) 순차 추가
+    - 스토리지 추가/삭제(`AccountService.Add_Cloud_Storage`/`Delete_Cloud_Storage`)는 `/api/files`보다 뒤로 미룸: 추가는 `GoogleAuthHelper.AuthorizeAsync` 등 로컬 브라우저 팝업이 필요한 인터랙티브 OAuth라 서버에서 그대로 못 돌림(클라이언트에 남기고 결과만 서버로 보내는 방식으로 재설계 필요), 삭제는 `AccountFile_Redistribution`으로 실제 파일을 다른 클라우드에 재업로드하므로 이번에 만든 파일 업/다운로드 위에서만 안전하게 구현 가능 — 재분배 자체도 5.1에 맞춰 클라이언트가 직접 업로드하는 구조로 다시 설계해야 함.
+  - [ ] **DbConfig.cs/직접 DB 접속 코드 완전 제거** — 위 항목이 전부(특히 파일/협업/이슈) 끝나기 전까지는 시도하지 않음. 지금 시도하면 API로 아직 이관 안 된 기능(업로드/다운로드/할당량 갱신/협업/이슈)이 전부 깨짐
+  - ⚠️ DB 직접 접속 코드를 실제로 지우는 순간부터는 신규 API 서버 없이 클라이언트가 아예 동작하지 않는다 (빅뱅 전환). 위 항목이 전부 끝나고 나서, 아래 롤백 계획을 먼저 준비한 뒤 진행할 것.
 - [ ] **Phase 5 — 인프라 결정 및 배포**: 신규 클라우드 선정(무료/저비용 MySQL 호스팅 포함), API 서버 배포, DB 데이터 마이그레이션
   - **롤백 계획**: 구버전 클라이언트 설치파일을 별도 보관, 신규 스택을 일정 기간 스모크 테스트한 뒤에만 배포 링크(`Server/public/download.html`)를 전환, 구 DB(RDS) 스냅샷은 신규 스택 안정화 확인 후 최소 N일(예: 2주) 보존 후 폐기
 - [ ] **Phase 6 — 보안 마감**: DB 계정을 root→최소권한 계정으로 교체, HTTPS 적용, 기존 노출됐던 비밀번호/시크릿 전부 로테이션(재발급), 로그인/토큰 발급 엔드포인트에 rate limiting 적용, 전 엔드포인트에 입력 검증 및 IDOR(내 리소스만 접근 가능한지) 점검
