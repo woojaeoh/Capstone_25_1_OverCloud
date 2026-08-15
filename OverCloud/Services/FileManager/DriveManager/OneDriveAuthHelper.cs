@@ -29,8 +29,8 @@ namespace OverCloud.Services.FileManager.DriveManager
             string RedirectUri = config.redirect_uri;
             string scopeString = string.Join(" ", config.scopes);
 
-            // 1. 브라우저로 사용자 인증 (브라우저 로그인 상태 무시하고 매번 인증)
-            string authUrl = $"{Authority}?client_id={ClientId}&response_type=code&redirect_uri={RedirectUri}&response_mode=query&scope={scopeString}&state=12345";
+            // 1. 브라우저로 사용자 인증 (캐시된 로그인 세션 무시하고 매번 계정 선택 화면 표시)
+            string authUrl = $"{Authority}?client_id={ClientId}&response_type=code&redirect_uri={RedirectUri}&response_mode=query&scope={scopeString}&state=12345&prompt=select_account";
             Console.WriteLine("브라우저 열기: " + authUrl);
             Process.Start(new ProcessStartInfo(authUrl) { UseShellExecute = true });
 

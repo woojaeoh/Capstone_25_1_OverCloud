@@ -17,7 +17,11 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
         "DB 연결 문자열이 없습니다. 환경변수 ConnectionStrings__Default 를 설정하세요.");
 
 builder.Services.AddSingleton<IAccountRepository>(_ => new AccountRepository(connectionString));
+builder.Services.AddSingleton<IStorageRepository>(_ => new StorageRepository(connectionString));
 builder.Services.AddSingleton<JwtTokenService>();
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<GoogleOAuthService>();
+builder.Services.AddSingleton<OneDriveOAuthService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -158,8 +162,70 @@ app.MapGet("/api/accounts/{userId}/async", async (string userId, ClaimsPrincipal
     return Results.Ok(accounts);
 }).RequireAuthorization();
 
+// Phase 3 — Google Drive access_token 발급: client_secret은 서버 설정에서만 읽고,
+// refresh_token은 GetCloud(cloudStorageNum, userId)로 "본인 소유 row"만 조회해 IDOR을 막는다
+// (WHERE cloud_storage_num=@num AND ID=@id 조건이 리포지토리 쿼리 안에 이미 있음).
+app.MapPost("/api/oauth/google/access-token", async (
+    OAuthAccessTokenRequest req,
+    ClaimsPrincipal user,
+    IStorageRepository storageRepository,
+    GoogleOAuthService googleOAuth) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var cloud = storageRepository.GetCloud(req.CloudStorageNum, sub);
+    if (cloud == null)
+        return Results.NotFound();
+
+    if (string.IsNullOrEmpty(cloud.RefreshToken))
+        return Results.BadRequest(new { error = "이 계정에 저장된 refresh token이 없습니다." });
+
+    try
+    {
+        var (accessToken, expiry) = await googleOAuth.ExchangeRefreshTokenAsync(cloud.RefreshToken);
+        return Results.Ok(new { accessToken, expiry });
+    }
+    catch (OAuthRefreshTokenInvalidException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+}).RequireAuthorization();
+
+// Phase 3 — OneDrive access_token 발급: Google과 동일 패턴. OneDrive는 public client라
+// client_secret 자체가 없고 client_id만 서버 설정(OAuth:OneDrive:ClientId)에서 읽는다.
+app.MapPost("/api/oauth/onedrive/access-token", async (
+    OAuthAccessTokenRequest req,
+    ClaimsPrincipal user,
+    IStorageRepository storageRepository,
+    OneDriveOAuthService oneDriveOAuth) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var cloud = storageRepository.GetCloud(req.CloudStorageNum, sub);
+    if (cloud == null)
+        return Results.NotFound();
+
+    if (string.IsNullOrEmpty(cloud.RefreshToken))
+        return Results.BadRequest(new { error = "이 계정에 저장된 refresh token이 없습니다." });
+
+    try
+    {
+        var (accessToken, expiry) = await oneDriveOAuth.ExchangeRefreshTokenAsync(cloud.RefreshToken);
+        return Results.Ok(new { accessToken, expiry });
+    }
+    catch (OAuthRefreshTokenInvalidException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+}).RequireAuthorization();
+
 app.Run();
 
 record LoginRequest(string UserId, string Password);
 record RefreshRequest(string UserId, string RefreshToken);
 record AuthResponse(string AccessToken, string RefreshToken, DateTime RefreshTokenExpiry);
+record OAuthAccessTokenRequest(int CloudStorageNum);

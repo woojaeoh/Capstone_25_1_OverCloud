@@ -205,6 +205,10 @@ JWT는 무상태(stateless)라 발급 후에는 서버가 개입해 즉시 무�
   - [x] 보호된 엔드포인트에 `[Authorize]` + IDOR 체크(sub == route userId)
   - [ ] 정지 계정 매 요청 DB 재확인(5.5) — **의도적으로 미룸**: 계정을 정지시킬 관리자 수단(API/DB) 자체가 아직 없어서 지금 만들어도 검증 불가. Phase 3/4에서 관리 기능이 생길 때 함께 설계 예정
 - [ ] **Phase 3 — OAuth 시크릿 이관**: 3개 Auth Helper를 서버 API로 이동, access-token 발급 엔드포인트 구현
+  - [x] Google: `POST /api/oauth/google/access-token` — client_secret은 서버 설정(`OAuth:Google:ClientSecret`)에서만 읽음, `GetCloud(cloudStorageNum, userId)`로 IDOR 방지, refresh token 만료/폐기(`invalid_grant`)는 401로 구분 응답 (테스트 완료: 정상 200, 만료 401 모두 확인)
+  - [x] OneDrive: `POST /api/oauth/onedrive/access-token` — Google과 동일 패턴, `client_secret` 없이 `client_id`만 사용(public client), 공통 `OAuthRefreshTokenInvalidException`으로 401 구분 응답 (테스트 완료: 정상 200 확인). 계정 추가 시 캐시된 브라우저 세션이 자동 재사용되던 문제를 `prompt=select_account` 추가로 별도 수정
+  - [ ] Dropbox: 동일 패턴으로 access-token 엔드포인트 추가
+  - [ ] 최초 계정 연동(authorization code → refresh_token 교환) 서버 이관 — Phase 4로 이월 (이번 라운드는 access-token 재발급만 범위)
 - [ ] **Phase 4 — 클라이언트 리팩토링**: `DbConfig.cs`/직접 DB 접속 코드 제거, `LanTransferService`의 DB 직접 조회를 `presence` API 호출로 교체, API 클라이언트로 교체, 로그인/토큰 발급 흐름 변경
   - ⚠️ 이 Phase부터는 신규 API 서버 없이는 클라이언트가 아예 동작하지 않는다 (빅뱅 전환). 아래 롤백 계획을 먼저 준비한 뒤 배포할 것.
 - [ ] **Phase 5 — 인프라 결정 및 배포**: 신규 클라우드 선정(무료/저비용 MySQL 호스팅 포함), API 서버 배포, DB 데이터 마이그레이션
