@@ -120,7 +120,7 @@ namespace overcloud.transfer_manager
                 return;
             }
 
-            var accessToken = await OverCloudApiClient.GetOAuthAccessTokenAsync(provider, location.CloudStorageNum);
+            var accessToken = await OverCloudApiClient.GetOAuthAccessTokenAsync(provider, file.UserId, location.CloudStorageNum);
             if (string.IsNullOrEmpty(accessToken))
                 return;
 

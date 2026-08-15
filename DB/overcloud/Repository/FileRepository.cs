@@ -314,10 +314,10 @@ namespace DB.overcloud.Repository
                 conn.Open();
 
                 string query = @"
-                    INSERT INTO CloudFileInfo 
-                        (file_name, cloud_storage_num, parent_folder_id, is_folder, ID)
-                    VALUES 
-                        (@file_name, @cloud_storage_num, @parent_folder_id, 1, @ID);
+                    INSERT INTO CloudFileInfo
+                        (file_name, file_size, cloud_storage_num, parent_folder_id, is_folder, ID)
+                    VALUES
+                        (@file_name, 0, @cloud_storage_num, @parent_folder_id, 1, @ID);
                     SELECT LAST_INSERT_ID();";
 
                 using (MySqlCommand cmd = new MySqlCommand(query, conn))

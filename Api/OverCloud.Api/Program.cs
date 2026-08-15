@@ -4,6 +4,7 @@ using DB.overcloud.Repository;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using MySql.Data.MySqlClient;
 using OverCloud.Api.Auth;
 using OverCloud.Services;
 using OverCloud.Services.FileManager.DriveManager;
@@ -87,6 +88,27 @@ builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
+// 부트스트랩: CloudFileInfo 루트 sentinel 행(file_id=-1, parent_folder_id=-2)이 없으면 만든다.
+// FileRepository.GetFullPath가 parent_folder_id 체인을 -2를 만날 때까지 타고 올라가는데(최상위 파일들의
+// parent_folder_id는 관례상 -1), 이 행이 없으면 GetFileById(-1)이 null을 반환해 다음 반복에서
+// NullReferenceException으로 죽는다. GetFileById는 소유자 필터 없이 file_id만 보므로(WHERE file_id=@id)
+// 계정별이 아니라 시스템 전체에 이 행이 딱 하나만 있으면 된다 — 지금까지는 운영 DB에 수동으로 넣어둔 상태였다.
+// 기존 값(ID='DEFAULT', file_name='ROOT')과 동일하게 맞춰서, 이미 이 행이 있는 지금 DB에는 아무 영향이 없다.
+using (var bootstrapConn = new MySqlConnection(connectionString))
+{
+    bootstrapConn.Open();
+    using var checkCmd = new MySqlCommand("SELECT COUNT(*) FROM CloudFileInfo WHERE file_id = -1", bootstrapConn);
+    long existingRootCount = Convert.ToInt64(checkCmd.ExecuteScalar());
+    if (existingRootCount == 0)
+    {
+        using var insertCmd = new MySqlCommand(@"
+            INSERT INTO CloudFileInfo (file_id, file_name, file_size, cloud_storage_num, parent_folder_id, is_folder, ID)
+            VALUES (-1, 'ROOT', 0, -1, -2, 1, 'DEFAULT')", bootstrapConn);
+        insertCmd.ExecuteNonQuery();
+        Console.WriteLine("✅ CloudFileInfo 루트 sentinel 행(file_id=-1) 생성됨 — 새 DB 부트스트랩");
+    }
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -95,6 +117,17 @@ if (app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// 협업 계정 공용 인가 판단: sub(로그인한 본인)가 targetUserId 자신이거나, targetUserId가 협업 계정이고
+// sub가 그 협업 계정의 정당한 멤버(CoopUserInfo)인 경우 허용한다. /api/quota, /api/files/*,
+// /api/oauth/{provider}/access-token 전부 "이 클라우드 스토리지/파일이 어느 계정 소유인가"를
+// sub 하나로만 가정하면 SharedAccountView(협업 계정으로 업/다운로드)가 항상 깨지므로 공통으로 뺐다.
+bool IsAuthorizedForAccount(string sub, string targetUserId, ICoopUserRepository coopUserRepository)
+{
+    if (sub == targetUserId)
+        return true;
+    return coopUserRepository.connected_cooperation_account_nums(sub).Contains(targetUserId);
+}
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
@@ -217,12 +250,8 @@ app.MapGet("/api/presence/{targetUserId}", (
 app.MapGet("/api/quota/{userId}", (string userId, ClaimsPrincipal user, IAccountRepository accountRepository, ICoopUserRepository coopUserRepository) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
-    if (sub != userId)
-    {
-        var coopIds = coopUserRepository.connected_cooperation_account_nums(sub);
-        if (!coopIds.Contains(userId))
-            return Results.Forbid();
-    }
+    if (!IsAuthorizedForAccount(sub, userId, coopUserRepository))
+        return Results.Forbid();
 
     var storages = accountRepository.GetAllAccounts(userId)
         .Where(c => c.CloudType != "SYSTEM")
@@ -242,19 +271,26 @@ app.MapGet("/api/quota/{userId}", (string userId, ClaimsPrincipal user, IAccount
     return Results.Ok(new { storages, totalCapacityKB = totalKB, usedCapacityKB = usedKB });
 }).RequireAuthorization();
 
-// Phase 4 — 파일 목록 조회: 특정 폴더(parentFolderId) 안의 파일/폴더 목록.
+// Phase 4 — 파일 목록 조회: userId(본인 또는 협업 계정) 소유의 특정 폴더(parentFolderId) 안의 파일/폴더 목록.
 // 최상위는 클라이언트 기존 관례와 동일하게 -1. all_file_list 쿼리 자체가 "WHERE ID = @user_id"로
-// 걸려있어(FileRepository.cs) 다른 사용자의 파일은 애초에 조회되지 않는다 — 이 IDOR은 리포지토리 계층에서 이미 막혀 있음.
-app.MapGet("/api/files/{parentFolderId:int}", (
+// 걸려있어(FileRepository.cs) userId가 아닌 계정의 파일은 애초에 조회되지 않는다 — 다만 sub가 그
+// userId를 조회할 자격이 있는지는 IsAuthorizedForAccount로 별도 확인해야 한다(협업 계정 케이스).
+// 참고: 아직 어떤 클라이언트 코드도 이 엔드포인트를 호출하지 않는다 — HomeView/SharedAccountView는
+// 여전히 FileRepository.all_file_list를 DB 직접 호출로 쓰고 있음(목록 조회는 이번 이관 범위 밖).
+app.MapGet("/api/files/{userId}/{parentFolderId:int}", (
+    string userId,
     int parentFolderId,
     ClaimsPrincipal user,
-    IFileRepository fileRepository) =>
+    IFileRepository fileRepository,
+    ICoopUserRepository coopUserRepository) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
     if (sub == null)
         return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, userId, coopUserRepository))
+        return Results.Forbid();
 
-    var files = fileRepository.all_file_list(parentFolderId, sub);
+    var files = fileRepository.all_file_list(parentFolderId, userId);
     return Results.Ok(files);
 }).RequireAuthorization();
 
@@ -262,16 +298,21 @@ app.MapGet("/api/files/{parentFolderId:int}", (
 // 동률이면 여유공간 많은 순)으로 업로드 대상 스토리지를 정해준다. 클라이언트는 이 응답의 CloudStorageNum으로
 // POST /api/oauth/{provider}/access-token을 호출해 access token을 받고, 그 토큰으로 클라우드 API를
 // "직접" 호출해 실제 바이트를 올린다(5.1 — 서버는 바이트를 중계하지 않는다).
+// req.UserId는 업로드 대상 계정 — 본인 계정일 수도, 협업 계정일 수도 있다(SharedAccountView).
+// sub 자신 또는 그 협업 계정의 정당한 멤버일 때만 허용한다(IsAuthorizedForAccount).
 app.MapPost("/api/files/select-storage", (
     SelectStorageRequest req,
     ClaimsPrincipal user,
-    CloudTierManager cloudTierManager) =>
+    CloudTierManager cloudTierManager,
+    ICoopUserRepository coopUserRepository) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
     if (sub == null)
         return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, req.UserId, coopUserRepository))
+        return Results.Forbid();
 
-    var best = cloudTierManager.SelectBestStorage(req.FileSizeKB, sub);
+    var best = cloudTierManager.SelectBestStorage(req.FileSizeKB, req.UserId);
     if (best == null)
         return Results.Conflict(new { error = "저장 가능한 클라우드가 없습니다 (용량 부족)." });
 
@@ -280,19 +321,23 @@ app.MapPost("/api/files/select-storage", (
 
 // Phase 4 — 업로드 확정: 클라이언트가 클라우드에 바이트를 이미 올린 뒤(select-storage → access-token →
 // 클라우드 API 직접 호출), 그 결과(cloudFileId)를 알려주면 서버는 CloudFileInfo 행을 만들고 할당량만 갱신한다.
-// req.CloudStorageNum이 sub 소유인지 GetCloud로 먼저 확인해 남의 스토리지 번호로 메타데이터를 심는 것을 막는다.
+// req.UserId(업로드 대상 계정, 본인 또는 협업 계정)로 GetCloud를 조회해야 한다 — select-storage가
+// 그 계정 소유 스토리지를 골랐기 때문에, 여기서 sub로 조회하면(협업 계정 업로드일 때) 항상 404가 난다.
 app.MapPost("/api/files/confirm-upload", (
     ConfirmUploadRequest req,
     ClaimsPrincipal user,
     IStorageRepository storageRepository,
     IFileRepository fileRepository,
-    QuotaManager quotaManager) =>
+    QuotaManager quotaManager,
+    ICoopUserRepository coopUserRepository) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
     if (sub == null)
         return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, req.UserId, coopUserRepository))
+        return Results.Forbid();
 
-    var cloud = storageRepository.GetCloud(req.CloudStorageNum, sub);
+    var cloud = storageRepository.GetCloud(req.CloudStorageNum, req.UserId);
     if (cloud == null)
         return Results.Forbid();
 
@@ -305,11 +350,11 @@ app.MapPost("/api/files/confirm-upload", (
         ParentFolderId = req.ParentFolderId,
         IsFolder = false,
         CloudFileId = req.CloudFileId,
-        ID = sub
+        ID = req.UserId
     };
 
     int fileId = fileRepository.AddFileAndReturnId(file);
-    quotaManager.UpdateQuotaAfterUploadOrDelete(req.CloudStorageNum, req.FileSizeKB, true, sub);
+    quotaManager.UpdateQuotaAfterUploadOrDelete(req.CloudStorageNum, req.FileSizeKB, true, req.UserId);
 
     return Results.Ok(new { fileId });
 }).RequireAuthorization();
@@ -317,11 +362,13 @@ app.MapPost("/api/files/confirm-upload", (
 // Phase 4 — 다운로드 위치 조회: 서버는 바이트를 중계하지 않으므로(5.1), fileId 소유자를 확인한 뒤
 // 어느 클라우드의 어떤 파일인지(cloudStorageNum, cloudFileId)만 알려준다. 클라이언트가 이 값으로
 // access-token을 받아 클라우드 API에서 직접 바이트를 받는다.
+// 소유자(file.ID)가 sub 본인이거나 sub가 그 협업 계정의 정당한 멤버면 허용한다.
 app.MapGet("/api/files/{fileId:int}/location", (
     int fileId,
     ClaimsPrincipal user,
     IFileRepository fileRepository,
-    IStorageRepository storageRepository) =>
+    IStorageRepository storageRepository,
+    ICoopUserRepository coopUserRepository) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
     if (sub == null)
@@ -330,13 +377,14 @@ app.MapGet("/api/files/{fileId:int}/location", (
     var file = fileRepository.GetFileById(fileId);
     if (file == null)
         return Results.NotFound();
-    if (file.ID != sub)
+    if (!IsAuthorizedForAccount(sub, file.ID, coopUserRepository))
         return Results.Forbid();
     if (file.IsFolder)
         return Results.BadRequest(new { error = "폴더는 다운로드 대상이 아닙니다." });
 
     // 클라이언트가 어느 제공자(Google/OneDrive) API를 호출해야 하는지 알아야 하므로 cloudType도 같이 내려준다.
-    var cloud = storageRepository.GetCloud(file.CloudStorageNum, sub);
+    // GetCloud는 file.ID(실제 소유 계정) 기준으로 조회해야 한다 — 협업 계정 파일이면 sub로는 항상 못 찾는다.
+    var cloud = storageRepository.GetCloud(file.CloudStorageNum, file.ID);
     if (cloud == null)
         return Results.NotFound();
 
@@ -345,12 +393,13 @@ app.MapGet("/api/files/{fileId:int}/location", (
 
 // Phase 4 — 파일 삭제(메타데이터): 클라이언트가 클라우드 API로 실제 파일을 이미 지운 뒤 호출하는 게 계약이다
 // (업로드와 대칭 — 서버는 바이트를 만지지 않는다). 폴더는 원래 클라우드 측 삭제가 없는 논리 항목이라
-// 곧바로 DB 행만 지우면 된다. 소유자 확인 후 진행.
+// 곧바로 DB 행만 지우면 된다. 소유자(본인 또는 협업 계정 멤버) 확인 후 진행.
 app.MapDelete("/api/files/{fileId:int}", (
     int fileId,
     ClaimsPrincipal user,
     IFileRepository fileRepository,
-    QuotaManager quotaManager) =>
+    QuotaManager quotaManager,
+    ICoopUserRepository coopUserRepository) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
     if (sub == null)
@@ -359,30 +408,34 @@ app.MapDelete("/api/files/{fileId:int}", (
     var file = fileRepository.GetFileById(fileId);
     if (file == null)
         return Results.NotFound();
-    if (file.ID != sub)
+    if (!IsAuthorizedForAccount(sub, file.ID, coopUserRepository))
         return Results.Forbid();
 
     bool dbDeleted = fileRepository.DeleteFile(fileId);
     if (dbDeleted && !file.IsFolder)
-        quotaManager.UpdateQuotaAfterUploadOrDelete(file.CloudStorageNum, file.FileSize, false, sub);
+        quotaManager.UpdateQuotaAfterUploadOrDelete(file.CloudStorageNum, file.FileSize, false, file.ID);
 
     return dbDeleted ? Results.NoContent() : Results.Problem("삭제 실패", statusCode: StatusCodes.Status500InternalServerError);
 }).RequireAuthorization();
 
 // Phase 3 — Google Drive access_token 발급: client_secret은 서버 설정에서만 읽고,
-// refresh_token은 GetCloud(cloudStorageNum, userId)로 "본인 소유 row"만 조회해 IDOR을 막는다
+// refresh_token은 GetCloud(cloudStorageNum, req.UserId)로 "그 계정 소유 row"만 조회해 IDOR을 막는다
 // (WHERE cloud_storage_num=@num AND ID=@id 조건이 리포지토리 쿼리 안에 이미 있음).
+// req.UserId는 본인 또는 협업 계정일 수 있다 — sub가 그 계정에 접근 권한이 있는지 먼저 확인한다.
 app.MapPost("/api/oauth/google/access-token", async (
     OAuthAccessTokenRequest req,
     ClaimsPrincipal user,
     IStorageRepository storageRepository,
+    ICoopUserRepository coopUserRepository,
     GoogleOAuthService googleOAuth) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
     if (sub == null)
         return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, req.UserId, coopUserRepository))
+        return Results.Forbid();
 
-    var cloud = storageRepository.GetCloud(req.CloudStorageNum, sub);
+    var cloud = storageRepository.GetCloud(req.CloudStorageNum, req.UserId);
     if (cloud == null)
         return Results.NotFound();
 
@@ -406,13 +459,16 @@ app.MapPost("/api/oauth/onedrive/access-token", async (
     OAuthAccessTokenRequest req,
     ClaimsPrincipal user,
     IStorageRepository storageRepository,
+    ICoopUserRepository coopUserRepository,
     OneDriveOAuthService oneDriveOAuth) =>
 {
     var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
     if (sub == null)
         return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, req.UserId, coopUserRepository))
+        return Results.Forbid();
 
-    var cloud = storageRepository.GetCloud(req.CloudStorageNum, sub);
+    var cloud = storageRepository.GetCloud(req.CloudStorageNum, req.UserId);
     if (cloud == null)
         return Results.NotFound();
 
@@ -435,7 +491,7 @@ app.Run();
 record LoginRequest(string UserId, string Password);
 record RefreshRequest(string UserId, string RefreshToken);
 record AuthResponse(string AccessToken, string RefreshToken, DateTime RefreshTokenExpiry);
-record OAuthAccessTokenRequest(int CloudStorageNum);
+record OAuthAccessTokenRequest(string UserId, int CloudStorageNum);
 record PresenceUpdateRequest(string? LocalIp, bool IsOnline);
-record SelectStorageRequest(ulong FileSizeKB);
-record ConfirmUploadRequest(int CloudStorageNum, string CloudFileId, string FileName, ulong FileSizeKB, int ParentFolderId);
+record SelectStorageRequest(string UserId, ulong FileSizeKB);
+record ConfirmUploadRequest(string UserId, int CloudStorageNum, string CloudFileId, string FileName, ulong FileSizeKB, int ParentFolderId);

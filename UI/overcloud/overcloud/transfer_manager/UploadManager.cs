@@ -98,7 +98,7 @@ namespace OverCloud.transfer_manager
                 });
 
                 ulong fileSize = (ulong)new FileInfo(file.LocalPath).Length;
-                var selected = await OverCloudApiClient.SelectStorageAsync(fileSize / 1024);
+                var selected = await OverCloudApiClient.SelectStorageAsync(userId, fileSize / 1024);
 
                 // 단일 스토리지에 다 안 들어가면(select-storage가 null 반환) 분산 저장으로 폴백 —
                 // 이 경로는 아직 미이관이라 기존 DB 직접 접속 FileUploadManager를 그대로 쓴다.
@@ -160,7 +160,7 @@ namespace OverCloud.transfer_manager
                 return false;
             }
 
-            var accessToken = await OverCloudApiClient.GetOAuthAccessTokenAsync(provider, selected.CloudStorageNum);
+            var accessToken = await OverCloudApiClient.GetOAuthAccessTokenAsync(provider, userId, selected.CloudStorageNum);
             if (string.IsNullOrEmpty(accessToken))
                 return false;
 
@@ -173,7 +173,7 @@ namespace OverCloud.transfer_manager
 
             ulong fileSizeKB = (ulong)new FileInfo(file.LocalPath).Length / 1024;
             var fileId = await OverCloudApiClient.ConfirmUploadAsync(
-                selected.CloudStorageNum, cloudFileId, Path.GetFileName(file.LocalPath), fileSizeKB, file.FolderId);
+                userId, selected.CloudStorageNum, cloudFileId, Path.GetFileName(file.LocalPath), fileSizeKB, file.FolderId);
 
             return fileId != null;
         }

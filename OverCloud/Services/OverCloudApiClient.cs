@@ -105,14 +105,15 @@ namespace OverCloud.Services
         // API 서버가 꺼져 있으면 업/다운로드는 실패한다(의도된 동작 — 기존처럼 조용히 DB로 폴백하지 않음).
 
         // provider: "google" 또는 "onedrive" (서버 라우트 세그먼트와 동일)
-        public static async Task<string> GetOAuthAccessTokenAsync(string provider, int cloudStorageNum)
+        // userId: 이 스토리지의 소유 계정(본인 또는 협업 계정) — 서버가 sub와 별개로 소유권/멤버십을 확인한다.
+        public static async Task<string> GetOAuthAccessTokenAsync(string provider, string userId, int cloudStorageNum)
         {
             if (!IsLoggedIn)
                 return null;
 
             try
             {
-                var payload = JsonSerializer.Serialize(new { cloudStorageNum });
+                var payload = JsonSerializer.Serialize(new { userId, cloudStorageNum });
                 using var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
                 var response = await _http.PostAsync($"/api/oauth/{provider}/access-token", content);
@@ -133,14 +134,15 @@ namespace OverCloud.Services
             }
         }
 
-        public static async Task<SelectedStorage> SelectStorageAsync(ulong fileSizeKB)
+        // userId: 업로드 대상 계정(본인 또는 협업 계정) — SelectBestStorage가 이 계정 소유 클라우드 중에서 고른다.
+        public static async Task<SelectedStorage> SelectStorageAsync(string userId, ulong fileSizeKB)
         {
             if (!IsLoggedIn)
                 return null;
 
             try
             {
-                var payload = JsonSerializer.Serialize(new { fileSizeKB });
+                var payload = JsonSerializer.Serialize(new { userId, fileSizeKB });
                 using var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
                 var response = await _http.PostAsync("/api/files/select-storage", content);
@@ -162,14 +164,15 @@ namespace OverCloud.Services
             }
         }
 
-        public static async Task<int?> ConfirmUploadAsync(int cloudStorageNum, string cloudFileId, string fileName, ulong fileSizeKB, int parentFolderId)
+        // userId: 업로드 대상 계정(본인 또는 협업 계정) — 생성되는 CloudFileInfo 행의 소유자가 된다.
+        public static async Task<int?> ConfirmUploadAsync(string userId, int cloudStorageNum, string cloudFileId, string fileName, ulong fileSizeKB, int parentFolderId)
         {
             if (!IsLoggedIn)
                 return null;
 
             try
             {
-                var payload = JsonSerializer.Serialize(new { cloudStorageNum, cloudFileId, fileName, fileSizeKB, parentFolderId });
+                var payload = JsonSerializer.Serialize(new { userId, cloudStorageNum, cloudFileId, fileName, fileSizeKB, parentFolderId });
                 using var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
                 var response = await _http.PostAsync("/api/files/confirm-upload", content);
