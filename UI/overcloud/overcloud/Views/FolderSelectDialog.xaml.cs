@@ -25,7 +25,8 @@ namespace overcloud.Views
             LoadFolders();
         }
 
-        private void LoadFolders()
+        // 생성자에서 fire-and-forget으로 호출(생성자는 async일 수 없음) — 다른 async void UI 핸들러와 동일한 패턴.
+        private async void LoadFolders()
         {
             // 내 클라우드
             var myRootItem = new TreeViewItem { Header = "📁 내 클라우드", Tag = -1 };
@@ -33,7 +34,7 @@ namespace overcloud.Views
             FolderTreeView.Items.Add(myRootItem);
 
             // 협업 클라우드
-            var cooperationIds = _controller.CoopUserRepository.connected_cooperation_account_nums(user_id);
+            var cooperationIds = await OverCloudApiClient.GetMyCoopAccountsAsync() ?? new List<string>();
             foreach (var coopUserId in cooperationIds)
             {
                 var coopRootItem = new TreeViewItem

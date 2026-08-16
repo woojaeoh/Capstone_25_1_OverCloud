@@ -17,7 +17,7 @@ namespace overcloud.Views
             InitializeComponent();
         }
 
-        private void RegisterButton_Click(object sender, RoutedEventArgs e)
+        private async void RegisterButton_Click(object sender, RoutedEventArgs e)
         {
             string userId = IdBox.Text.Trim();
             string password = PasswordBox.Password.Trim();
@@ -35,7 +35,7 @@ namespace overcloud.Views
                 return;
             }
 
-            bool success = _controller.CooperationManager.Add_cooperation_Cloud_Storage_UI_to_pro(userId, password, user_id);
+            bool success = await OverCloudApiClient.CreateCoopAsync(userId, password);
 
             if (success)
             {

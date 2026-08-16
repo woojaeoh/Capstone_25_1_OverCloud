@@ -43,9 +43,10 @@ namespace overcloud.Views
             DueDatePicker.SelectedDate = _issueInfo.DueDate;
         }
 
-        private void LoadAssignedUserList()
+        // 생성자(→LoadData)에서 fire-and-forget으로 호출(생성자는 async일 수 없음).
+        private async void LoadAssignedUserList()
         {
-            var users = _controller.CoopUserRepository.GetUsersByCoopId(_coopId);
+            var users = await OverCloudApiClient.GetCoopMembersAsync(_coopId) ?? new List<string>();
             AssignedToComboBox.Items.Clear();
 
             // null 가능하도록 맨 앞에 (없음) 추가
@@ -76,7 +77,7 @@ namespace overcloud.Views
             }
         }
 
-        private void SaveButton_Click(object sender, RoutedEventArgs e)
+        private async void SaveButton_Click(object sender, RoutedEventArgs e)
         {
             _issueInfo.Title = TitleTextBox.Text;
             _issueInfo.Description = DescriptionTextBox.Text;
@@ -95,7 +96,9 @@ namespace overcloud.Views
 
             _issueInfo.DueDate = DueDatePicker.SelectedDate;
 
-            bool updated = _controller.FileIssueRepository.UpdateIssue(_issueInfo);
+            bool updated = await OverCloudApiClient.UpdateIssueAsync(
+                _issueInfo.IssueId, _issueInfo.Title, _issueInfo.Description,
+                _issueInfo.AssignedTo, _issueInfo.Status, _issueInfo.DueDate);
             if (updated)
             {
                 System.Windows.MessageBox.Show("이슈가 수정되었습니다.");

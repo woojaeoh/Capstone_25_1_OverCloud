@@ -72,9 +72,15 @@ namespace overcloud.Views
             // 실패해도(API 서버 미기동 등) 기존 로그인 흐름은 그대로 진행 — LoginAsync가 예외를 삼킴.
             await OverCloud.Services.OverCloudApiClient.LoginAsync(userId, password);
 
-            // 1. 계정 리스트 구성
+            // 1. 계정 리스트 구성 — 협업 계정 목록은 이제 API로만 가져온다(폴백 없음, 파일 업/다운로드와
+            // 같은 기준). 실패해도 로그인 자체는 막지 않고 개인 계정만으로 계속 진행한다(LoginAsync와
+            // 동일하게, 이 메서드 안에서 API 실패가 전체 로그인을 막지 않는다는 원칙을 유지).
             var allAccounts = new List<string> { userId };
-            allAccounts.AddRange(_controller.CoopUserRepository.connected_cooperation_account_nums(userId));
+            var coopAccounts = await OverCloud.Services.OverCloudApiClient.GetMyCoopAccountsAsync();
+            if (coopAccounts != null)
+                allAccounts.AddRange(coopAccounts);
+            else
+                Console.WriteLine("⚠️ 협업 계정 목록을 가져오지 못했습니다 — 개인 계정만으로 계속 진행합니다.");
 
             // 2. 전체 스토리지 수집
             var allStorages = new List<CloudStorageInfo>();

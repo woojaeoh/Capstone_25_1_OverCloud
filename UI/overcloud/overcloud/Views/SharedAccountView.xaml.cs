@@ -76,10 +76,10 @@ namespace overcloud.Views
         }
 
 
-        private void HomeView_Loaded(object sender, RoutedEventArgs e)
+        private async void HomeView_Loaded(object sender, RoutedEventArgs e)
         {
-            LoadAccountTrees();
-            RefreshExplorer();
+            await LoadAccountTreesAsync();
+            await RefreshExplorerAsync();
         }
 
 
@@ -279,8 +279,8 @@ namespace overcloud.Views
 
                     await CollectAllFilesFromFolder(rootPath, currentFolderId);  // 리스트 반환 X, 내부에서 큐 등록됨
 
-                    LoadFolderContents(currentFolderId, _currentAccountId);
-                    RefreshExplorer();
+                    await LoadFolderContentsAsync(currentFolderId, _currentAccountId);
+                    await RefreshExplorerAsync();
                 }
             }
         }
@@ -359,15 +359,16 @@ namespace overcloud.Views
             }
         }
 
-        private void RefreshExplorer()
+        private async Task RefreshExplorerAsync()
         {
             // 1) 현재 확장된 노드들의 ID를 수집
             var expandedIds = new HashSet<int>();
             CollectExpandedIds(FileExplorerTree.Items, expandedIds);
 
-            // 2) 트리 클리어 & 루트 로드
+            // 2) 트리 클리어 & 루트 로드 — LoadAccountTreesAsync가 끝난 뒤에야 트리가 채워지므로
+            // RestoreExpandedState는 반드시 await 뒤에 실행해야 한다(전에는 동기 호출이라 순서가 자동 보장됐음).
             FileExplorerTree.Items.Clear();
-            LoadAccountTrees();
+            await LoadAccountTreesAsync();
 
             // 3) 저장된 ID에 해당하는 노드 다시 펼치기
             RestoreExpandedState(FileExplorerTree.Items, expandedIds);
@@ -423,24 +424,28 @@ namespace overcloud.Views
 
 
 
-        private void FileExplorerTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
+        private async void FileExplorerTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
         {
             if (e.NewValue is TreeViewItem item && item.Tag is AccountFolderTag tag)
             {
                 currentFolderId = tag.FolderId;
                 _currentAccountId = tag.AccountId; // string으로 필드 선언 필요
-                LoadFolderContents(currentFolderId, _currentAccountId);
+                await LoadFolderContentsAsync(currentFolderId, _currentAccountId);
             }
             Console.WriteLine("현재 폴더 위치 변경 : " + currentFolderId + ", 계정 : " + _currentAccountId);
 
             LoadUsageDetails(_currentAccountId);
         }
 
-        private void LoadFolderContents(int folderId, string accountId)
+        // 파일별 이슈 상태 조회를 API로 이관 — 파일 개수만큼 순차 대기하면 느려지므로 Task.WhenAll로 병렬 호출한다.
+        private async Task LoadFolderContentsAsync(int folderId, string accountId)
         {
-            var vms = _controller.FileRepository
-                .all_file_list(folderId, accountId)
-                .Select(f =>
+            var files = _controller.FileRepository.all_file_list(folderId, accountId).ToList();
+
+            var issuesTasks = files.Select(f => OverCloudApiClient.GetIssuesByFileAsync(f.FileId)).ToList();
+            var issuesResults = await Task.WhenAll(issuesTasks);
+
+            var vms = files.Select((f, i) =>
                 {
                     // 1) CloudFileInfo → VM 생성
                     var vm = ToViewModel(f);
@@ -449,13 +454,12 @@ namespace overcloud.Views
                     vm.FullPath = string.Empty;
 
                     // 3) 이슈 조회 & 상태 세팅
-                    var issues = _controller.FileIssueRepository
-                                   .GetIssuesByFileId(f.FileId);
+                    var issues = issuesResults[i];
 
                     if (issues != null && issues.Any())
                     {
                         var lowestStatus = issues
-                            .Select(i => Enum.Parse<IssueStatusEnum>(i.Status))
+                            .Select(iss => Enum.Parse<IssueStatusEnum>(iss.Status))
                             .Min();
                         vm.IssueStatus = lowestStatus.ToString();
                     }
@@ -478,11 +482,18 @@ namespace overcloud.Views
         private record AccountFolderTag(string AccountId, int FolderId);
 
 
-        private void LoadAccountTrees()
+        // 본인(_user_id)이 속한 협업 계정 목록 — API 폴백 없음(파일 업/다운로드와 같은 기준). 실패하면
+        // 개인 계정 트리는 못 그려도 예외로 화면 전체가 죽지는 않게 빈 목록으로 처리한다.
+        private async Task LoadAccountTreesAsync()
         {
             FileExplorerTree.Items.Clear();
 
-            var accounts = _controller.CoopUserRepository.connected_cooperation_account_nums(_user_id);
+            var accounts = await OverCloudApiClient.GetMyCoopAccountsAsync();
+            if (accounts == null)
+            {
+                Console.WriteLine("⚠️ 협업 계정 목록을 가져오지 못했습니다 — 트리에 협업 계정이 표시되지 않습니다.");
+                accounts = new List<string>();
+            }
 
             foreach (var accountId in accounts)
             {
@@ -540,17 +551,10 @@ namespace overcloud.Views
                         if (folder != null)
                         {
                             currentFolderId = folder.FileId;
-                            //LoadFolderContents(currentFolderId);
-                            //SelectFolderInTree(folder.FileId);
-                            await Task.Run(() =>
-                            {
-                                System.Windows.Application.Current.Dispatcher.Invoke(() =>
-                                {
-                                    LoadFolderContents(currentFolderId, _currentAccountId);
-                                    SelectFolderInTree(_currentAccountId, folder.FileId);
-
-                                });
-                            });
+                            // 이미 UI 스레드(이벤트 핸들러)라 Task.Run+Dispatcher.Invoke로 우회할 필요가 없다 —
+                            // LoadFolderContentsAsync가 비동기(await)라 그 안에서는 어차피 못 쓰던 패턴이었다.
+                            await LoadFolderContentsAsync(currentFolderId, _currentAccountId);
+                            SelectFolderInTree(_currentAccountId, folder.FileId);
                         }
                     }
                 }
@@ -794,8 +798,8 @@ namespace overcloud.Views
             }
 
             // UI 갱신
-            LoadFolderContents(currentFolderId, _currentAccountId);
-            RefreshExplorer();
+            await LoadFolderContentsAsync(currentFolderId, _currentAccountId);
+            await RefreshExplorerAsync();
         }
 
 
@@ -875,7 +879,7 @@ namespace overcloud.Views
 
         ///////////////////////////////////////////////////////////////////////////////////////////////////////
         ///폴더 추가
-        private void Button_AddFolder_Click(object sender, RoutedEventArgs e)
+        private async void Button_AddFolder_Click(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrEmpty(_currentAccountId))
             {
@@ -924,8 +928,8 @@ namespace overcloud.Views
             }
 
             // UI 갱신
-            LoadFolderContents(currentFolderId, _currentAccountId);
-            RefreshExplorer();
+            await LoadFolderContentsAsync(currentFolderId, _currentAccountId);
+            await RefreshExplorerAsync();
 
 
         }
@@ -1015,34 +1019,34 @@ namespace overcloud.Views
         }
         */
 
-        private void CreateCooperationAccount_Click(object sender, RoutedEventArgs e)
+        private async void CreateCooperationAccount_Click(object sender, RoutedEventArgs e)
         {
             var registerWindow = new COP_RegisterWindow(_controller, _user_id);
             registerWindow.Owner = Window.GetWindow(this); // 모달창으로 띄우기
             registerWindow.ShowDialog();
 
             // 협업 계정 생성 후 트리 새로고침 필요할 경우
-            RefreshExplorer(); // 또는 LoadAccountTrees() 등
+            await RefreshExplorerAsync();
         }
 
-        private void JoinCooperationAccount_Click(object sender, RoutedEventArgs e)
+        private async void JoinCooperationAccount_Click(object sender, RoutedEventArgs e)
         {
             var registerWindow = new COP_JoinWindow(_controller, _user_id);
             registerWindow.Owner = Window.GetWindow(this); // 모달창으로 띄우기
             registerWindow.ShowDialog();
 
             // 협업 계정 생성 후 트리 새로고침 필요할 경우
-            RefreshExplorer(); // 또는 LoadAccountTrees() 등
+            await RefreshExplorerAsync();
         }
 
-        private void DisJoinCooperationAccount_Click(object sender, RoutedEventArgs e)
+        private async void DisJoinCooperationAccount_Click(object sender, RoutedEventArgs e)
         {
             var registerWindow = new COP_Dis_JoinWindow(_controller, _user_id);
             registerWindow.Owner = Window.GetWindow(this); // 모달창으로 띄우기
             registerWindow.ShowDialog();
 
             // 협업 계정 생성 후 트리 새로고침 필요할 경우
-            RefreshExplorer(); // 또는 LoadAccountTrees() 등
+            await RefreshExplorerAsync();
         }
 
         private void Button_GenerateLink_Click(object sender, RoutedEventArgs e)
@@ -1091,7 +1095,11 @@ namespace overcloud.Views
             window.ShowDialog();
         }
 
-        private void Button_CreateIssue_Click(object sender, RoutedEventArgs e)
+        // coopId(_currentAccountId)는 협업 계정 — sub(_user_id)와 다를 수 있다. 멤버 목록 조회/이슈 생성
+        // 모두 coopId를 명시적으로 넘겨야 한다(예전 업로드 버그처럼 sub로 새면 안 됨) — 서버가
+        // IsAuthorizedForAccount(sub, coopId, ...)로 sub가 이 coopId의 정당한 멤버인지 검증한다.
+        // CreatedBy는 더 이상 클라이언트가 안 보낸다 — 서버가 토큰의 sub로 강제한다(위조 방지).
+        private async void Button_CreateIssue_Click(object sender, RoutedEventArgs e)
         {
             var selectedFiles = GetCheckedFiles();
             if (selectedFiles.Count == 0)
@@ -1102,7 +1110,12 @@ namespace overcloud.Views
 
             // 현재 협업 계정 ID 사용
             string coopId = _currentAccountId;
-            List<string> userList = _controller.CoopUserRepository.GetUsersByCoopId(coopId);
+            List<string> userList = await OverCloudApiClient.GetCoopMembersAsync(coopId);
+            if (userList == null)
+            {
+                System.Windows.MessageBox.Show("협업 계정 멤버 목록을 가져오지 못했습니다.");
+                return;
+            }
 
             var issueDialog = new AddIssueDialog(userList)
             {
@@ -1115,37 +1128,15 @@ namespace overcloud.Views
                 string description = issueDialog.IssueDescription;
                 string assignedTo = string.IsNullOrWhiteSpace(issueDialog.AssignedTo) ? null : issueDialog.AssignedTo;
                 DateTime? dueDate = issueDialog.DueDate;
+                List<int> fileIds = selectedFiles.Select(f => f.FileId).ToList();
 
-                // 이슈 객체 1개 생성 (파일 여러 개에 대해 동일 이슈 등록)
-                var newIssue = new FileIssueInfo
-                {
-                    ID = coopId,   // 협업 클라우드 ID
-                    Title = title,
-                    Description = description,
-                    CreatedBy = _user_id,
-                    AssignedTo = assignedTo,
-                    Status = "OPEN",
-                    CreatedAt = DateTime.Now,
-                    DueDate = dueDate
-                };
+                // 이슈 등록 + 선택된 파일들과의 매핑을 한 번의 호출로 처리
+                int? issueId = await OverCloudApiClient.CreateIssueAsync(coopId, title, description, assignedTo, dueDate, fileIds);
 
-                // 이슈 등록
-                int issueId = _controller.FileIssueRepository.AddIssue(newIssue);
-
-                if (issueId == -1)
+                if (issueId == null)
                 {
                     System.Windows.MessageBox.Show("이슈 등록 실패");
                     return;
-                }
-
-                // 선택된 모든 파일에 대해 매핑 등록
-                foreach (var file in selectedFiles)
-                {
-                    bool mappingResult = _controller.FileIssueMappingRepository.AddMapping(issueId, file.FileId);
-                    if (!mappingResult)
-                    {
-                        System.Windows.MessageBox.Show($"파일 '{file.FileName}' 매핑 실패");
-                    }
                 }
 
                 System.Windows.MessageBox.Show("이슈 등록 성공");
@@ -1153,12 +1144,12 @@ namespace overcloud.Views
         }
 
 
-        private void SharedAccountView_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        private async void SharedAccountView_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key == Key.F5)
             {
                 // 현재 폴더 내용 새로고침
-                LoadFolderContents(currentFolderId, _currentAccountId);
+                await LoadFolderContentsAsync(currentFolderId, _currentAccountId);
             }
         }
 

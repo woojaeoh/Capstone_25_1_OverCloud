@@ -31,9 +31,9 @@ namespace overcloud.Views
             // 초기화
             _currentFilter = "All";
         }
-        private void UserControl_Loaded(object sender, RoutedEventArgs e)
+        private async void UserControl_Loaded(object sender, RoutedEventArgs e)
         {
-            _cooperationGroups = _controller.CoopUserRepository.connected_cooperation_account_nums(_user_id);
+            _cooperationGroups = await OverCloudApiClient.GetMyCoopAccountsAsync() ?? new List<string>();
             CoopSelector.ItemsSource = _cooperationGroups;
 
             if (_cooperationGroups.Any())

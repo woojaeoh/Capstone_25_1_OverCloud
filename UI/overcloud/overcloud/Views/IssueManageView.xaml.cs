@@ -30,20 +30,20 @@ namespace overcloud.Views
             this.Focus();
         }
 
-        private void IssueManageView_Loaded(object sender, RoutedEventArgs e)
+        private async void IssueManageView_Loaded(object sender, RoutedEventArgs e)
         {
-            LoadCooperationList();
+            await LoadCooperationList();
         }
 
-        private void LoadCooperationList()
+        private async Task LoadCooperationList()
         {
-            var coopList = _controller.CoopUserRepository
-                            .connected_cooperation_account_nums(_userId)
-                            .Select(id => new CoopAccountViewModel { 
+            var coopAccounts = await OverCloudApiClient.GetMyCoopAccountsAsync() ?? new List<string>();
+            var coopList = coopAccounts
+                            .Select(id => new CoopAccountViewModel {
                                 AccountId = id,
                                 ImagePath = "pack://application:,,,/overcloud;component/asset/box.png"
                             })
-                                
+
                             .ToList();
 
             CoopListBox.ItemsSource = coopList;
@@ -55,7 +55,7 @@ namespace overcloud.Views
         }
 
         // 핵심 변경: Mouse 이벤트로 항상 선택 이벤트를 강제 발생
-        private void CoopListBox_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        private async void CoopListBox_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             var item = ItemsControl.ContainerFromElement(CoopListBox, e.OriginalSource as DependencyObject) as ListBoxItem;
             if (item != null)
@@ -64,17 +64,17 @@ namespace overcloud.Views
                 if (item.DataContext is CoopAccountViewModel selectedCoop)
                 {
                     currentCoopId = selectedCoop.AccountId;
-                    LoadIssues();
+                    await LoadIssues();
                 }
                 e.Handled = true;
             }
         }
 
-        private void LoadIssues()
+        private async Task LoadIssues()
         {
             if (currentCoopId == null) return;
 
-            currentIssueList = _controller.FileIssueRepository.GetAllIssues(currentCoopId);
+            currentIssueList = await OverCloudApiClient.GetIssuesAsync(currentCoopId) ?? new List<FileIssueInfo>();
             ApplyFilter();
         }
 
@@ -100,9 +100,9 @@ namespace overcloud.Views
             ApplyFilter();
         }
 
-        private void RefreshButton_Click(object sender, RoutedEventArgs e)
+        private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            LoadIssues();
+            await LoadIssues();
         }
 
         private void IssueCard_Click(object sender, MouseButtonEventArgs e)
@@ -142,12 +142,12 @@ namespace overcloud.Views
             public string ImagePath { get; set; }
         }
 
-        private void HomeView_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        private async void HomeView_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key == Key.F5)
             {
                 // 현재 폴더 내용 새로고침
-                LoadIssues();
+                await LoadIssues();
             }
         }
     }

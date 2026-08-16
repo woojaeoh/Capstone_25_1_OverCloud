@@ -40,9 +40,11 @@ namespace overcloud.Views
             LoadIssueDisplayView();
         }
 
-        private void LoadRelatedFiles()
+        // 생성자에서 fire-and-forget으로 호출(생성자는 async일 수 없음) — 다른 async void UI 핸들러와 동일한 패턴.
+        // fileId → 전체 경로 해석(GetFullPath)은 이번 이슈 API 이관 범위 밖이라 기존 DB 직접 접속 그대로 둔다.
+        private async void LoadRelatedFiles()
         {
-            var fileIds = _controller.FileIssueMappingRepository.GetFileIdsByIssueId(_issueInfo.IssueId);
+            var fileIds = await OverCloudApiClient.GetIssueFilesAsync(_issueInfo.IssueId) ?? new List<int>();
 
             List<string> fullPaths = new();
 
@@ -72,26 +74,25 @@ namespace overcloud.Views
             return "/" + string.Join("/", pathParts);
         }
 
-        private void LoadComments()
+        // 생성자에서 fire-and-forget으로 호출(생성자는 async일 수 없음).
+        private async void LoadComments()
         {
-            var commentList = _controller.FileIssueCommentRepository.GetCommentsByIssueId(_issueInfo.IssueId);
+            var commentList = await OverCloudApiClient.GetIssueCommentsAsync(_issueInfo.IssueId) ?? new List<FileIssueComment>();
             CommentListBox.ItemsSource = commentList;
         }
 
-        private void AddCommentButton_Click(object sender, RoutedEventArgs e)
+        private async void AddCommentButton_Click(object sender, RoutedEventArgs e)
         {
             var input = Microsoft.VisualBasic.Interaction.InputBox("댓글을 입력하세요:", "코멘트 추가", "");
             if (!string.IsNullOrWhiteSpace(input))
             {
-                var newComment = new FileIssueComment
+                // commenterId는 더 이상 클라이언트가 안 보낸다 — 서버가 토큰의 sub로 강제한다(위조 방지).
+                bool added = await OverCloudApiClient.AddIssueCommentAsync(_issueInfo.IssueId, input);
+                if (!added)
                 {
-                    IssueId = _issueInfo.IssueId,
-                    CommenterId = _controller.user_id,
-                    Content = input,
-                    CreatedAt = DateTime.Now
-                };
-
-                _controller.FileIssueCommentRepository.AddComment(newComment);
+                    System.Windows.MessageBox.Show("댓글 등록 실패");
+                    return;
+                }
                 LoadComments();
             }
         }
@@ -101,13 +102,18 @@ namespace overcloud.Views
             RightDetailArea.Content = new IssueInfoEditView(_controller, _issueInfo, this);
         }
 
-        private void DeleteIssueButton_Click(object sender, RoutedEventArgs e)
+        private async void DeleteIssueButton_Click(object sender, RoutedEventArgs e)
         {
             var confirm = System.Windows.MessageBox.Show("정말 이 이슈를 삭제하시겠습니까?", "이슈 삭제", MessageBoxButton.YesNo);
             if (confirm == MessageBoxResult.Yes)
             {
-                _controller.FileIssueMappingRepository.DeleteMappingsByIssueId(_issueInfo.IssueId);
-                _controller.FileIssueRepository.DeleteIssue(_issueInfo.IssueId);
+                // 서버가 매핑 정리(DeleteMappingsByIssueId)까지 한 번의 호출로 같이 처리한다.
+                bool deleted = await OverCloudApiClient.DeleteIssueAsync(_issueInfo.IssueId);
+                if (!deleted)
+                {
+                    System.Windows.MessageBox.Show("이슈 삭제 실패");
+                    return;
+                }
                 System.Windows.MessageBox.Show("이슈 삭제 완료");
 
                 // 부모 창 닫기

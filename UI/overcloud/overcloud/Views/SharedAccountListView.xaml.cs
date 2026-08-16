@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows;
+using System.Threading.Tasks;
 
 namespace overcloud.Views
 {
@@ -30,9 +31,9 @@ namespace overcloud.Views
             _user_id = user_id;
         }
 
-        private void SharedAccountListView_Loaded(object sender, RoutedEventArgs e)
+        private async void SharedAccountListView_Loaded(object sender, RoutedEventArgs e)
         {
-            _cooperationGroups = _controller.CoopUserRepository.connected_cooperation_account_nums(_user_id);
+            _cooperationGroups = await OverCloudApiClient.GetMyCoopAccountsAsync() ?? new List<string>();
 
             // "전체 보기" 항목 추가
             _cooperationGroups.Insert(0, "전체");
@@ -41,23 +42,23 @@ namespace overcloud.Views
             CoopSelector.SelectedIndex = 0; // 기본은 전체
         }
 
-        private void CoopSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private async void CoopSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (CoopSelector.SelectedItem is string selected)
             {
                 _selectedCoopId = selected;
-                RefreshList();
+                await RefreshList();
             }
         }
 
-        private void RefreshList()
+        private async Task RefreshList()
         {
             _items = new ObservableCollection<AccountItemViewModel>();
 
             if (_selectedCoopId == "전체")
             {
                 // 전체 협업 클라우드 기준
-                var joinedCoops = _controller.CoopUserRepository.connected_cooperation_account_nums(_user_id);
+                var joinedCoops = await OverCloudApiClient.GetMyCoopAccountsAsync() ?? new List<string>();
 
                 foreach (var coopId in joinedCoops)
                 {
@@ -129,22 +130,22 @@ namespace overcloud.Views
         }
 
 
-        private void Button_Add_Click(object sender, RoutedEventArgs e)
+        private async void Button_Add_Click(object sender, RoutedEventArgs e)
         {
             var window = new AddAccountWindow(_controller, _user_id, true);
             window.Owner = Window.GetWindow(this);
             window.ShowDialog();
 
-            RefreshList();
+            await RefreshList();
         }
 
-        private void Button_Delete_Click(object sender, RoutedEventArgs e)
+        private async void Button_Delete_Click(object sender, RoutedEventArgs e)
         {
             var window = new DeleteAccountWindow(_controller, _user_id, true);
             window.Owner = Window.GetWindow(this);
             window.ShowDialog();
 
-            RefreshList();
+            await RefreshList();
         }
 
 
