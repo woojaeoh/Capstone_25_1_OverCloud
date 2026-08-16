@@ -18,32 +18,33 @@ namespace OverCloud.Services
  
         }
 
+        // 최우선순위(1티어, 동률이면 여유 공간 많은) 클라우드 하나만 확인한다 — 그 클라우드가 파일 전체를
+        // 못 담으면 다른(낮은 우선순위) 클라우드를 훑어서 "혼자 담을 수 있는 곳"을 찾지 않고 바로 null을
+        // 반환해 분산 저장(GetStoragePlan)으로 위임한다. 최우선 클라우드를 최대한 채우고 나머지를 다음
+        // 티어로 이어서 저장하는 게, 여러(저용량) 클라우드를 하나처럼 묶어 쓰는 오버클라우드의 취지에 맞다.
         public CloudStorageInfo SelectBestStorage(ulong fileSizeKB, string userId) //kb단위로 호출
         {
 
             var clouds = accountRepository.GetAllAccounts(userId);
-            if (clouds == null)
+            if (clouds == null || clouds.Count == 0)
             {
                 System.Diagnostics.Debug.WriteLine("❌ 클라우드 계정 없음");
                 return null;
             }
-                
-                  // 사전 정의된 티어 순서
-            var ordered = clouds
-                .OrderBy(c => GetTierValue(c.CloudType))  //1순위: 티어 순서 
-                .ThenByDescending(c => c.TotalCapacity - c.UsedCapacity); // 같은 티어일 땐 여유 공간 많은 순
 
-            foreach (var cloud in ordered)
-            {
-                var remaining = (long)cloud.TotalCapacity - (long)cloud.UsedCapacity;
-                Console.WriteLine($"🧪 클라우드: {cloud.CloudType}, 잔여용량: {remaining}KB");
+            var best = clouds
+                .OrderBy(c => GetTierValue(c.CloudType))  //1순위: 티어 순서
+                .ThenByDescending(c => c.TotalCapacity - c.UsedCapacity) // 같은 티어일 땐 여유 공간 많은 순
+                .First();
 
-                if (remaining >= (long)fileSizeKB) // KB 단위 맞추기
-                    return cloud;
-            }
+            var remaining = (long)best.TotalCapacity - (long)best.UsedCapacity;
+            Console.WriteLine($"🧪 최우선 클라우드: {best.CloudType}, 잔여용량: {remaining}KB, 요청: {fileSizeKB}KB");
 
-            Console.WriteLine("❌ 저장 가능한 클라우드가 없습니다.");
-            return null; // 저장 가능한 클라우드 없음
+            if (remaining >= (long)fileSizeKB) // KB 단위 맞추기
+                return best;
+
+            Console.WriteLine("❌ 최우선 클라우드에 다 안 들어감 — 분산 저장으로 위임");
+            return null;
         }
 
         private int GetTierValue(string cloudType)
