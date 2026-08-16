@@ -7,6 +7,7 @@ namespace DB.overcloud.Repository
         int AddIssue(FileIssueInfo issue);
         List<FileIssueInfo> GetAllIssues(string ID);
         List<FileIssueInfo> GetIssuesByFileId(int fileId);
+        FileIssueInfo? GetIssueById(int issueId);
         bool UpdateIssue(FileIssueInfo issue);
         bool UpdateIssueStatus(int issueId, string status);
         bool AssignIssue(int issueId, string assignedTo);

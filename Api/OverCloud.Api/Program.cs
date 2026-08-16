@@ -24,6 +24,9 @@ builder.Services.AddSingleton<IAccountRepository>(_ => new AccountRepository(con
 builder.Services.AddSingleton<IStorageRepository>(_ => new StorageRepository(connectionString));
 builder.Services.AddSingleton<IFileRepository>(_ => new FileRepository(connectionString));
 builder.Services.AddSingleton<ICoopUserRepository>(_ => new CoopUserRepository(connectionString));
+builder.Services.AddSingleton<IFileIssueRepository>(_ => new FileIssueRepository(connectionString));
+builder.Services.AddSingleton<IFileIssueCommentRepository>(_ => new FileIssueCommentRepository(connectionString));
+builder.Services.AddSingleton<IFileIssueMappingRepository>(_ => new FileIssueMappingRepository(connectionString));
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<GoogleOAuthService>();
@@ -486,6 +489,221 @@ app.MapPost("/api/oauth/onedrive/access-token", async (
     }
 }).RequireAuthorization();
 
+// Phase 4 — 이슈 트래커: FileIssueInfo.ID가 소유 협업 계정이다. 오늘 반복한 패턴 그대로,
+// sub 본인 또는 그 협업 계정의 정당한 멤버만 접근 가능(IsAuthorizedForAccount). 이슈 단위 조작
+// (수정/삭제/댓글/파일목록)은 issue_id로 GetIssueById를 먼저 조회해 소유 협업 계정을 알아낸 뒤 검증한다 —
+// 기존 클라이언트 DB 직접 경로(IssueDetailView 등)는 이 소유권 확인을 전혀 하지 않았다(신규 검증).
+app.MapPost("/api/issues", (
+    IssueCreateRequest req,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    IFileIssueMappingRepository mappingRepository,
+    IFileRepository fileRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, req.CoopId, coopUserRepository))
+        return Results.Forbid();
+
+    // assigned_to는 account 테이블 FK라, 존재하지 않거나 이 협업 계정 멤버가 아닌 ID를 그대로 넘기면
+    // MySqlException(FK 제약 위반)이 원시 500으로 노출된다 — 미리 검증해서 깔끔한 400을 준다.
+    if (!string.IsNullOrEmpty(req.AssignedTo) && !coopUserRepository.GetUsersByCoopId(req.CoopId).Contains(req.AssignedTo))
+        return Results.BadRequest(new { error = "존재하지 않거나 이 협업 계정 멤버가 아닌 담당자입니다." });
+
+    var issue = new FileIssueInfo
+    {
+        ID = req.CoopId,
+        Title = req.Title,
+        Description = req.Description,
+        CreatedBy = sub, // 클라이언트가 보낸 값이 아니라 토큰의 sub를 그대로 씀(위조 방지)
+        AssignedTo = req.AssignedTo,
+        Status = "OPEN",
+        CreatedAt = DateTime.Now,
+        DueDate = req.DueDate
+    };
+
+    int issueId = issueRepository.AddIssue(issue);
+    if (issueId <= 0)
+        return Results.Problem("이슈 등록 실패", statusCode: StatusCodes.Status500InternalServerError);
+
+    // fileId가 실제로 이 협업 계정(req.CoopId) 소유인지 확인 후에만 매핑한다 — 다른 계정 파일에
+    // 이슈를 붙이는 것을 막는다(기존 클라이언트 코드엔 이 확인이 없었다).
+    if (req.FileIds != null)
+    {
+        foreach (var fileId in req.FileIds)
+        {
+            var file = fileRepository.GetFileById(fileId);
+            if (file == null || file.ID != req.CoopId)
+                continue;
+            mappingRepository.AddMapping(issueId, fileId);
+        }
+    }
+
+    return Results.Ok(new { issueId });
+}).RequireAuthorization();
+
+app.MapGet("/api/issues/{coopId}", (
+    string coopId,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, coopId, coopUserRepository))
+        return Results.Forbid();
+
+    return Results.Ok(issueRepository.GetAllIssues(coopId));
+}).RequireAuthorization();
+
+// 특정 파일에 달린 이슈 목록 — 인가는 이슈가 아니라 그 파일의 소유자(file.ID) 기준.
+app.MapGet("/api/issues/by-file/{fileId:int}", (
+    int fileId,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    IFileRepository fileRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var file = fileRepository.GetFileById(fileId);
+    if (file == null)
+        return Results.NotFound();
+    if (!IsAuthorizedForAccount(sub, file.ID, coopUserRepository))
+        return Results.Forbid();
+
+    return Results.Ok(issueRepository.GetIssuesByFileId(fileId));
+}).RequireAuthorization();
+
+app.MapPut("/api/issues/{issueId:int}", (
+    int issueId,
+    IssueUpdateRequest req,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var existing = issueRepository.GetIssueById(issueId);
+    if (existing == null)
+        return Results.NotFound();
+    if (!IsAuthorizedForAccount(sub, existing.ID, coopUserRepository))
+        return Results.Forbid();
+
+    // assigned_to는 account 테이블 FK라, 존재하지 않거나 이 협업 계정 멤버가 아닌 ID를 그대로 넘기면
+    // MySqlException(FK 제약 위반)이 원시 500으로 노출된다 — 미리 검증해서 깔끔한 400을 준다.
+    if (!string.IsNullOrEmpty(req.AssignedTo) && !coopUserRepository.GetUsersByCoopId(existing.ID).Contains(req.AssignedTo))
+        return Results.BadRequest(new { error = "존재하지 않거나 이 협업 계정 멤버가 아닌 담당자입니다." });
+
+    existing.Title = req.Title;
+    existing.Description = req.Description;
+    existing.AssignedTo = req.AssignedTo;
+    existing.Status = req.Status;
+    existing.DueDate = req.DueDate;
+
+    bool updated = issueRepository.UpdateIssue(existing);
+    return updated ? Results.Ok() : Results.Problem("이슈 수정 실패", statusCode: StatusCodes.Status500InternalServerError);
+}).RequireAuthorization();
+
+app.MapDelete("/api/issues/{issueId:int}", (
+    int issueId,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    IFileIssueMappingRepository mappingRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var existing = issueRepository.GetIssueById(issueId);
+    if (existing == null)
+        return Results.NotFound();
+    if (!IsAuthorizedForAccount(sub, existing.ID, coopUserRepository))
+        return Results.Forbid();
+
+    mappingRepository.DeleteMappingsByIssueId(issueId);
+    bool deleted = issueRepository.DeleteIssue(issueId);
+    return deleted ? Results.NoContent() : Results.Problem("이슈 삭제 실패", statusCode: StatusCodes.Status500InternalServerError);
+}).RequireAuthorization();
+
+app.MapGet("/api/issues/{issueId:int}/files", (
+    int issueId,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    IFileIssueMappingRepository mappingRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var issue = issueRepository.GetIssueById(issueId);
+    if (issue == null)
+        return Results.NotFound();
+    if (!IsAuthorizedForAccount(sub, issue.ID, coopUserRepository))
+        return Results.Forbid();
+
+    return Results.Ok(mappingRepository.GetFileIdsByIssueId(issueId));
+}).RequireAuthorization();
+
+app.MapGet("/api/issues/{issueId:int}/comments", (
+    int issueId,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    IFileIssueCommentRepository commentRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var issue = issueRepository.GetIssueById(issueId);
+    if (issue == null)
+        return Results.NotFound();
+    if (!IsAuthorizedForAccount(sub, issue.ID, coopUserRepository))
+        return Results.Forbid();
+
+    return Results.Ok(commentRepository.GetCommentsByIssueId(issueId));
+}).RequireAuthorization();
+
+app.MapPost("/api/issues/{issueId:int}/comments", (
+    int issueId,
+    IssueCommentRequest req,
+    ClaimsPrincipal user,
+    IFileIssueRepository issueRepository,
+    IFileIssueCommentRepository commentRepository,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var issue = issueRepository.GetIssueById(issueId);
+    if (issue == null)
+        return Results.NotFound();
+    if (!IsAuthorizedForAccount(sub, issue.ID, coopUserRepository))
+        return Results.Forbid();
+
+    var comment = new FileIssueComment
+    {
+        IssueId = issueId,
+        CommenterId = sub, // 클라이언트가 보낸 값이 아니라 토큰의 sub를 그대로 씀(위조 방지)
+        Content = req.Content,
+        CreatedAt = DateTime.Now
+    };
+
+    bool added = commentRepository.AddComment(comment);
+    return added ? Results.Ok() : Results.Problem("댓글 등록 실패", statusCode: StatusCodes.Status500InternalServerError);
+}).RequireAuthorization();
+
 app.Run();
 
 record LoginRequest(string UserId, string Password);
@@ -495,3 +713,6 @@ record OAuthAccessTokenRequest(string UserId, int CloudStorageNum);
 record PresenceUpdateRequest(string? LocalIp, bool IsOnline);
 record SelectStorageRequest(string UserId, ulong FileSizeKB);
 record ConfirmUploadRequest(string UserId, int CloudStorageNum, string CloudFileId, string FileName, ulong FileSizeKB, int ParentFolderId);
+record IssueCreateRequest(string CoopId, string Title, string? Description, string? AssignedTo, DateTime? DueDate, List<int>? FileIds);
+record IssueUpdateRequest(string Title, string? Description, string? AssignedTo, string Status, DateTime? DueDate);
+record IssueCommentRequest(string Content);

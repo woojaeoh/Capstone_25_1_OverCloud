@@ -109,6 +109,34 @@ namespace DB.overcloud.Repository
             return issues;
         }
 
+        public FileIssueInfo? GetIssueById(int issueId)
+        {
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            string query = "SELECT * FROM FileIssueInfo WHERE issue_id = @id";
+
+            using var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@id", issueId);
+
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                return null;
+
+            return new FileIssueInfo
+            {
+                IssueId = reader.GetInt32("issue_id"),
+                ID = reader.GetString("ID"),
+                Title = reader.GetString("title"),
+                Description = reader.GetString("description"),
+                CreatedBy = reader.GetString("created_by"),
+                AssignedTo = reader.IsDBNull(reader.GetOrdinal("assigned_to")) ? null : reader.GetString("assigned_to"),
+                Status = reader.GetString("status"),
+                CreatedAt = reader.GetDateTime("created_at"),
+                DueDate = reader.IsDBNull(reader.GetOrdinal("due_date")) ? null : reader.GetDateTime("due_date")
+            };
+        }
+
         public bool UpdateIssue(FileIssueInfo issue)
         {
             using var conn = new MySqlConnection(connectionString);
