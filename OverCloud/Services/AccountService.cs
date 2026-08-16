@@ -26,6 +26,9 @@ namespace OverCloud.Services
         }
 
         // 오버클라우드 계정에 새로운 계정 추가 (UI에서 호출)
+        // Phase 4 — GoogleDrive/OneDrive는 이제 overcloud.transfer_manager.StorageAddManager(신규 API
+        // 기반 오케스트레이션, 로컬 client_secret 의존 없음)로 이관됨. 이 메서드는 AddAccountWindow에서
+        // 더 이상 그 두 타입으로 호출되지 않고 Dropbox 전용 경로로만 남아있다(Dropbox 자체 이관은 범위 밖).
         public async Task<bool> Add_Cloud_Storage(CloudStorageInfo storage, string userId) //storage가 협업, userid가 개인오버클라우드 id
         {
             //협업 클라우드 아이디를 넘겨줌
@@ -59,13 +62,17 @@ namespace OverCloud.Services
             }
 
             bool result = storageRepository.AddCloudStorage(storage, userId);
-            
-            var clouds = accountRepository.GetAllAccounts(storage.ID);
-            var OneCloud = clouds.FirstOrDefault(c => c.AccountId == storage.AccountId);
-
 
             if (result)
             {
+                var clouds = accountRepository.GetAllAccounts(storage.ID);
+                var OneCloud = clouds.FirstOrDefault(c => c.AccountId == storage.AccountId);
+                if (OneCloud == null)
+                {
+                    Console.WriteLine("❌ 계정 추가 직후 방금 추가한 계정을 다시 찾지 못함 — 용량 갱신 생략");
+                    return result;
+                }
+
                 //계정 추가 성공시 바로 용량 업데이트 호출
                 await quotaManager.SaveDriveQuotaToDB(storage.ID, OneCloud.CloudStorageNum);
 
