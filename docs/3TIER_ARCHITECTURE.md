@@ -244,7 +244,12 @@ JWT는 무상태(stateless)라 발급 후에는 서버가 개입해 즉시 무�
     - `POST /api/issues`에서 초기 파일 매핑 시 각 `fileId`가 실제로 `req.CoopId` 소유인지 확인 후에만 매핑(기존 클라이언트 코드엔 이 확인이 없었음 — 신규 검증).
     - `UpdateIssueStatus`/`AssignIssue`(단독), `DeleteComment`/`UpdateComment`/`GetCommentById`, `AddMapping`/`DeleteMapping`(단독)은 실제 호출하는 클라이언트 코드가 없어 이번엔 API로 안 옮김 — 필요해지면 같은 패턴으로 추가.
     - **버그 수정: 잘못된 `assignedTo`가 원시 MySQL FK 예외를 그대로 500으로 노출** — Swagger 검증 중 발견. `assigned_to`는 `account.ID`를 참조하는 FK라, 존재하지 않거나 그 협업 계정 멤버가 아닌 값을 넘기면 `MySqlException`(FK 제약 위반)이 그대로 500 응답에 노출됐다(테이블/제약조건 이름까지 드러남). `POST /api/issues`·`PUT /api/issues/{issueId}` 모두 저장 전에 `coopUserRepository.GetUsersByCoopId(coopId)`로 실제 멤버인지 확인해 아니면 400을 반환하도록 고침. `GetUsersByCoopId`가 `ICoopUserRepository` 인터페이스엔 없고 구현체(`CoopUserRepository`)에만 있어서 인터페이스에 추가함.
-  - [ ] 나머지 엔드포인트(`/api/coop/*`, 스토리지 추가/삭제) 순차 추가
+  - [x] `/api/coop/*` 추가 — `CoopUserRepository`(생성/가입/탈퇴/멤버 조회)를 API로 이관. 이슈 클라이언트 교체 전에 먼저 필요(코업 목록/멤버 목록이 이슈 화면 곳곳에서 쓰임):
+    - `POST /api/coop`(생성), `POST /api/coop/join`(가입), `POST /api/coop/{coopId}/leave`(탈퇴), `GET /api/coop/mine`(본인이 속한 협업 계정 목록), `GET /api/coop/{coopId}/members`(멤버 목록, `IsAuthorizedForAccount`로 인가)
+    - **비밀번호 처리는 사용자 확인 후 평문 유지로 결정** — `Add_cooperation_Cloud_Storage_pro_to_DB`/`Join_cooperation_Cloud_Storage_pro_to_DB`가 원래부터 salt+해시(일반 계정, `RegisterWindow`→`PasswordHasher`) 없이 평문으로 저장/비교하고 있었다. DB 직접 접속일 때보다 HTTP API로 오가면 노출 경로가 하나 늘어난다는 점을 알리고 하드닝 여부를 물었으나, 동작 변경 없이 그대로 이관하기로 결정 — 하드닝은 필요해지면 별도로 논의.
+    - **버그 예방**: `Join_cooperation_Cloud_Storage_pro_to_DB`는 이미 멤버인 상태로 다시 호출하면(중복 INSERT) 원시 예외/중복 행 위험이 있어, 호출 전에 `connected_cooperation_account_nums(sub)`로 이미 멤버인지 확인해 409를 반환하도록 가드 추가(기존 클라이언트 코드엔 이 확인이 없었음).
+    - 얇은 pass-through인 `CooperationManager`(Services 계층)는 거치지 않고 `ICoopUserRepository`를 엔드포인트에서 직접 호출 — `/api/issues/*`와 동일한 패턴.
+  - [ ] 스토리지 추가/삭제 순차 추가
     - 스토리지 추가/삭제(`AccountService.Add_Cloud_Storage`/`Delete_Cloud_Storage`)는 `/api/files`보다 뒤로 미룸: 추가는 `GoogleAuthHelper.AuthorizeAsync` 등 로컬 브라우저 팝업이 필요한 인터랙티브 OAuth라 서버에서 그대로 못 돌림(클라이언트에 남기고 결과만 서버로 보내는 방식으로 재설계 필요), 삭제는 `AccountFile_Redistribution`으로 실제 파일을 다른 클라우드에 재업로드하므로 이번에 만든 파일 업/다운로드 위에서만 안전하게 구현 가능 — 재분배 자체도 5.1에 맞춰 클라이언트가 직접 업로드하는 구조로 다시 설계해야 함.
   - [ ] **DbConfig.cs/직접 DB 접속 코드 완전 제거** — 위 항목이 전부(특히 파일/협업/이슈) 끝나기 전까지는 시도하지 않음. 지금 시도하면 API로 아직 이관 안 된 기능(업로드/다운로드/할당량 갱신/협업/이슈)이 전부 깨짐
   - ⚠️ DB 직접 접속 코드를 실제로 지우는 순간부터는 신규 API 서버 없이 클라이언트가 아예 동작하지 않는다 (빅뱅 전환). 위 항목이 전부 끝나고 나서, 아래 롤백 계획을 먼저 준비한 뒤 진행할 것.

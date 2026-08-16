@@ -704,6 +704,85 @@ app.MapPost("/api/issues/{issueId:int}/comments", (
     return added ? Results.Ok() : Results.Problem("댓글 등록 실패", statusCode: StatusCodes.Status500InternalServerError);
 }).RequireAuthorization();
 
+// Phase 4 — 협업 계정: CoopUserRepository는 이미 /api/quota, /api/files/*, /api/issues/*의
+// IsAuthorizedForAccount에서 멤버십 조회 용도로 써왔다. 여기서는 생성/가입/탈퇴/조회 자체를 API로 옮긴다.
+// 비밀번호는 기존 클라이언트 DB 직접 경로와 동일하게 평문으로 유지한다(사용자 확인 후 결정 —
+// 행동 변경 없이 그대로 이관, 하드닝은 별도 논의 필요).
+app.MapPost("/api/coop", (
+    CoopCreateRequest req,
+    ClaimsPrincipal user,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    bool created = coopUserRepository.Add_cooperation_Cloud_Storage_pro_to_DB(req.CoopId, req.Password, sub);
+    return created
+        ? Results.Ok()
+        : Results.Conflict(new { error = "협업 계정 생성 실패 (이미 존재하는 ID일 수 있습니다)." });
+}).RequireAuthorization();
+
+app.MapPost("/api/coop/join", (
+    CoopJoinRequest req,
+    ClaimsPrincipal user,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    // 이미 멤버인 상태로 다시 가입 시도하면 CoopUserInfo에 중복 행이 쌓이거나(유니크 제약이 있다면)
+    // 원시 예외가 날 수 있어 미리 막는다.
+    if (coopUserRepository.connected_cooperation_account_nums(sub).Contains(req.CoopId))
+        return Results.Conflict(new { error = "이미 가입된 협업 계정입니다." });
+
+    bool joined = coopUserRepository.Join_cooperation_Cloud_Storage_pro_to_DB(req.CoopId, req.Password, sub);
+    return joined
+        ? Results.Ok()
+        : Results.BadRequest(new { error = "협업 계정 ID 또는 비밀번호가 올바르지 않습니다." });
+}).RequireAuthorization();
+
+app.MapPost("/api/coop/{coopId}/leave", (
+    string coopId,
+    ClaimsPrincipal user,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    bool left = coopUserRepository.Delete_cooperation_Cloud_Storage_pro_to_DB(coopId, sub);
+    return left ? Results.NoContent() : Results.NotFound(new { error = "이 협업 계정의 멤버가 아닙니다." });
+}).RequireAuthorization();
+
+// 본인이 속한 협업 계정 목록 — 항상 sub 기준이라 대상 계정 인가 체크가 필요 없다.
+app.MapGet("/api/coop/mine", (
+    ClaimsPrincipal user,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    return Results.Ok(coopUserRepository.connected_cooperation_account_nums(sub));
+}).RequireAuthorization();
+
+// 협업 계정 멤버 목록 — sub가 그 협업 계정의 정당한 멤버일 때만 다른 멤버 목록을 볼 수 있다.
+app.MapGet("/api/coop/{coopId}/members", (
+    string coopId,
+    ClaimsPrincipal user,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, coopId, coopUserRepository))
+        return Results.Forbid();
+
+    return Results.Ok(coopUserRepository.GetUsersByCoopId(coopId));
+}).RequireAuthorization();
+
 app.Run();
 
 record LoginRequest(string UserId, string Password);
@@ -716,3 +795,5 @@ record ConfirmUploadRequest(string UserId, int CloudStorageNum, string CloudFile
 record IssueCreateRequest(string CoopId, string Title, string? Description, string? AssignedTo, DateTime? DueDate, List<int>? FileIds);
 record IssueUpdateRequest(string Title, string? Description, string? AssignedTo, string Status, DateTime? DueDate);
 record IssueCommentRequest(string Content);
+record CoopCreateRequest(string CoopId, string Password);
+record CoopJoinRequest(string CoopId, string Password);
