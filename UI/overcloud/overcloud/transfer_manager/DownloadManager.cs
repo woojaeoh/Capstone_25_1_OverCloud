@@ -76,15 +76,22 @@ namespace overcloud.transfer_manager
 
                 // Phase 4 3단계(5.1) — 분산 저장 다운로드는 아직 미이관이라 기존 DB 직접 접속 경로 그대로.
                 // 단일 파일은 /api/files/{fileId}/location으로 위치를 받아 클라이언트가 클라우드 API를 직접 호출한다.
-                if (file.IsDistributed)
-                    await _fileDownloadManager.DownloadAndMergeFile(file.FileID, file.LocalPath, file.UserId, file.CloudStorageNum);
-                else
-                    await DownloadViaCloudApiAsync(file);
+                bool result = file.IsDistributed
+                    ? await _fileDownloadManager.DownloadAndMergeFile(file.FileID, file.LocalPath, file.UserId, file.CloudStorageNum)
+                    : await DownloadViaCloudApiAsync(file);
 
                 System.Windows.Application.Current.Dispatcher.Invoke(() =>
-                {  
-                    item.CompleteDownload();
-                    App.TransferManager.Completed.Add(item);
+                {
+                    if (result)
+                    {
+                        item.CompleteDownload();
+                        App.TransferManager.Completed.Add(item);
+                    }
+                    else
+                    {
+                        item.Status = "실패";
+                        item.Progress = 0;
+                    }
                 });
             }
             catch (Exception ex)
@@ -99,13 +106,14 @@ namespace overcloud.transfer_manager
 
         // location으로 소유권이 재확인된 최신 cloudStorageNum/cloudFileId/cloudType을 받아
         // 클라우드 API에서 직접 바이트를 받는다(5.1 — 서버는 바이트를 중계하지 않는다).
-        private static async Task DownloadViaCloudApiAsync(DownloadTaskInfo file)
+        // 성공 여부를 bool로 반환해야 ProcessDownload가 "완료"/"실패" 상태를 제대로 표시할 수 있다.
+        private static async Task<bool> DownloadViaCloudApiAsync(DownloadTaskInfo file)
         {
             var location = await OverCloudApiClient.GetFileLocationAsync(file.FileID);
             if (location == null)
             {
                 Console.WriteLine($"❌ 파일 위치 조회 실패: fileId {file.FileID}");
-                return;
+                return false;
             }
 
             string provider = location.CloudType switch
@@ -117,12 +125,12 @@ namespace overcloud.transfer_manager
             if (provider == null)
             {
                 Console.WriteLine($"❌ 지원되지 않는 클라우드: {location.CloudType}");
-                return;
+                return false;
             }
 
             var accessToken = await OverCloudApiClient.GetOAuthAccessTokenAsync(provider, file.UserId, location.CloudStorageNum);
             if (string.IsNullOrEmpty(accessToken))
-                return;
+                return false;
 
             bool ok = provider == "google"
                 ? await GoogleDriveTokenClient.DownloadAsync(accessToken, location.CloudFileId, file.LocalPath)
@@ -130,6 +138,8 @@ namespace overcloud.transfer_manager
 
             if (!ok)
                 Console.WriteLine($"❌ 다운로드 실패: fileId {file.FileID}");
+
+            return ok;
         }
     }
 

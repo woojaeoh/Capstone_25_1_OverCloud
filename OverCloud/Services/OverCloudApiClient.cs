@@ -135,10 +135,12 @@ namespace OverCloud.Services
         }
 
         // userId: 업로드 대상 계정(본인 또는 협업 계정) — SelectBestStorage가 이 계정 소유 클라우드 중에서 고른다.
-        public static async Task<SelectedStorage> SelectStorageAsync(string userId, ulong fileSizeKB)
+        // 409(진짜 용량 부족)와 그 외 실패(네트워크 예외/서버 다운/인증 오류 등)를 구분해서 반환한다 —
+        // 전자만 분산 저장 폴백 대상이고, 후자는 폴백 없이 업로드 자체를 실패 처리해야 한다(5.1 원칙).
+        public static async Task<SelectStorageResult> SelectStorageAsync(string userId, ulong fileSizeKB)
         {
             if (!IsLoggedIn)
-                return null;
+                return new SelectStorageResult(null, ServerUnreachable: true);
 
             try
             {
@@ -146,21 +148,29 @@ namespace OverCloud.Services
                 using var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
                 var response = await _http.PostAsync("/api/files/select-storage", content);
+
+                if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+                    return new SelectStorageResult(null, ServerUnreachable: false); // 진짜 용량 부족 — 분산 저장 폴백 대상
+
                 if (!response.IsSuccessStatusCode)
-                    return null; // 409(용량 부족) 포함 — 호출부가 분산 저장 등으로 처리 여부 판단
+                {
+                    Console.WriteLine($"❌ 스토리지 선택 실패: {(int)response.StatusCode}");
+                    return new SelectStorageResult(null, ServerUnreachable: true);
+                }
 
                 var body = await response.Content.ReadAsStringAsync();
                 using var json = JsonDocument.Parse(body);
                 var root = json.RootElement;
-                return new SelectedStorage(
+                var selected = new SelectedStorage(
                     root.GetProperty("cloudStorageNum").GetInt32(),
                     root.GetProperty("cloudType").GetString(),
                     root.GetProperty("accountId").GetString());
+                return new SelectStorageResult(selected, ServerUnreachable: false);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠️ 스토리지 선택 API 호출 실패: {ex.Message}");
-                return null;
+                Console.WriteLine($"⚠️ 스토리지 선택 API 호출 실패 (서버 다운/네트워크 오류): {ex.Message}");
+                return new SelectStorageResult(null, ServerUnreachable: true);
             }
         }
 
@@ -251,5 +261,8 @@ namespace OverCloud.Services
     }
 
     public record SelectedStorage(int CloudStorageNum, string CloudType, string AccountId);
+    // ServerUnreachable: true면 서버 다운/네트워크 오류 등 — 분산 저장 폴백 금지, 업로드 실패 처리.
+    // false + Storage == null이면 409(진짜 용량 부족) — 분산 저장 폴백 대상.
+    public record SelectStorageResult(SelectedStorage Storage, bool ServerUnreachable);
     public record FileLocation(int CloudStorageNum, string CloudType, string CloudFileId, string FileName, ulong FileSize);
 }

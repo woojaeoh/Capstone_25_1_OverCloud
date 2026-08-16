@@ -98,20 +98,31 @@ namespace OverCloud.transfer_manager
                 });
 
                 ulong fileSize = (ulong)new FileInfo(file.LocalPath).Length;
-                var selected = await OverCloudApiClient.SelectStorageAsync(userId, fileSize / 1024);
+                var selectResult = await OverCloudApiClient.SelectStorageAsync(userId, fileSize / 1024);
 
-                // 단일 스토리지에 다 안 들어가면(select-storage가 null 반환) 분산 저장으로 폴백 —
-                // 이 경로는 아직 미이관이라 기존 DB 직접 접속 FileUploadManager를 그대로 쓴다.
-                bool result = selected != null
-                    ? await UploadViaCloudApiAsync(selected, file, userId)
-                    : await _fileUploadManager.Upload_Distributed(file.LocalPath, file.FolderId, userId);
+                // 409(진짜 용량 부족)만 분산 저장으로 폴백한다(기존 DB 직접 접속 FileUploadManager, 아직 미이관).
+                // 서버 다운/네트워크 오류(ServerUnreachable)는 폴백하지 않고 업로드를 실패 처리한다(5.1 원칙).
+                bool result;
+                string failureMessage = null;
+                if (selectResult.ServerUnreachable)
+                {
+                    result = false;
+                    failureMessage = "서버에 연결할 수 없습니다";
+                    Console.WriteLine($"❌ [{file.FileName}] 서버에 연결할 수 없어 업로드 실패 처리 (분산 저장 폴백 안 함)");
+                }
+                else if (selectResult.Storage != null)
+                {
+                    result = await UploadViaCloudApiAsync(selectResult.Storage, file, userId);
+                }
+                else
+                {
+                    result = await _fileUploadManager.Upload_Distributed(file.LocalPath, file.FolderId, userId);
+                }
 
                 Console.WriteLine($"[MEM] [{file.FileName}] 완료 — 힙:{ManagedHeapMB()}MB  WorkingSet:{WorkingSetMB()}MB  (업로드 전 대비 힙 증가: {ManagedHeapMB() - heapBefore}MB)");
 
                 System.Windows.Application.Current.Dispatcher.Invoke(() =>
                 {
-                    item.Status = result ? "완료" : "실패";
-                    item.Progress = result ? 100 : 0;
                     if (result)
                     {
                         item.CompleteUpload();
@@ -119,7 +130,7 @@ namespace OverCloud.transfer_manager
                     }
                     else
                     {
-                        item.Status = "실패";
+                        item.Status = failureMessage ?? "실패";
                         item.Progress = 0;
                     }
                 });
