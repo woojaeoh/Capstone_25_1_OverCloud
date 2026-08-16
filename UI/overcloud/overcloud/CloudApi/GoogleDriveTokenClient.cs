@@ -51,11 +51,46 @@ namespace overcloud.CloudApi
 
         public static async Task<bool> DownloadAsync(string accessToken, string cloudFileId, string savePath)
         {
-            var service = CreateDriveService(accessToken);
-            var request = service.Files.Get(cloudFileId);
-            using var stream = new FileStream(savePath, FileMode.Create, FileAccess.Write);
-            await request.DownloadAsync(stream);
-            return true;
+            try
+            {
+                var service = CreateDriveService(accessToken);
+                var request = service.Files.Get(cloudFileId);
+                using var stream = new FileStream(savePath, FileMode.Create, FileAccess.Write);
+                var progress = await request.DownloadAsync(stream);
+                if (progress.Status != Google.Apis.Download.DownloadStatus.Completed)
+                {
+                    Console.WriteLine($"❌ Google Drive 다운로드 실패: {progress.Status} cloudFileId={cloudFileId} — {progress.Exception?.Message}");
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Google Drive 다운로드 API 호출 실패: cloudFileId={cloudFileId} — {ex.Message}");
+                return false;
+            }
+        }
+
+        // 스토리지 추가 시 계정 이메일 + 용량을 한 번에 조회(about.get의 fields로 한 번에 묶음).
+        public static async Task<(string email, ulong totalKB, ulong usedKB)?> GetAccountInfoAsync(string accessToken)
+        {
+            try
+            {
+                var service = CreateDriveService(accessToken);
+                var request = service.About.Get();
+                request.Fields = "user,storageQuota";
+                var about = await request.ExecuteAsync();
+
+                string email = about.User?.EmailAddress;
+                ulong totalKB = about.StorageQuota?.Limit != null ? (ulong)(about.StorageQuota.Limit.Value / 1024) : 0;
+                ulong usedKB = about.StorageQuota?.Usage != null ? (ulong)(about.StorageQuota.Usage.Value / 1024) : 0;
+                return (email, totalKB, usedKB);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Google Drive 계정 정보 조회 실패: {ex.Message}");
+                return null;
+            }
         }
 
         public static async Task<bool> DeleteAsync(string accessToken, string cloudFileId)

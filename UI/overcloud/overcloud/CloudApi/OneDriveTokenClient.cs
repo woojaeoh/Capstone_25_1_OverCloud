@@ -123,13 +123,26 @@ namespace overcloud.CloudApi
             using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 
-            var response = await client.GetAsync($"https://graph.microsoft.com/v1.0/me/drive/items/{cloudFileId}/content");
-            if (!response.IsSuccessStatusCode) return false;
+            try
+            {
+                var response = await client.GetAsync($"https://graph.microsoft.com/v1.0/me/drive/items/{cloudFileId}/content");
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errBody = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"❌ OneDrive 다운로드 실패: {(int)response.StatusCode} cloudFileId={cloudFileId} — {errBody}");
+                    return false;
+                }
 
-            using var httpStream = await response.Content.ReadAsStreamAsync();
-            using var fileStream = new FileStream(savePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
-            await httpStream.CopyToAsync(fileStream);
-            return true;
+                using var httpStream = await response.Content.ReadAsStreamAsync();
+                using var fileStream = new FileStream(savePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
+                await httpStream.CopyToAsync(fileStream);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ OneDrive 다운로드 API 호출 실패: cloudFileId={cloudFileId} — {ex.Message}");
+                return false;
+            }
         }
 
         public static async Task<bool> DeleteAsync(string accessToken, string cloudFileId)
@@ -139,6 +152,43 @@ namespace overcloud.CloudApi
 
             var response = await client.DeleteAsync($"https://graph.microsoft.com/v1.0/me/drive/items/{cloudFileId}");
             return response.IsSuccessStatusCode;
+        }
+
+        // 스토리지 추가 시 계정 이메일 + 용량 조회. OneDrive Graph API는 이 둘을 한 번에 묶어 주는 엔드포인트가
+        // 없어 /me와 /me/drive를 각각 호출한다(기존 OneDriveService.GetUserEmailAsync/GetDriveQuotaAsync 이관).
+        public static async Task<(string email, ulong totalKB, ulong usedKB)?> GetAccountInfoAsync(string accessToken)
+        {
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            try
+            {
+                var meResponse = await client.GetAsync("https://graph.microsoft.com/v1.0/me");
+                if (!meResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"❌ OneDrive 계정 정보 조회 실패: {(int)meResponse.StatusCode}");
+                    return null;
+                }
+                using var meJson = JsonDocument.Parse(await meResponse.Content.ReadAsStringAsync());
+                string email = meJson.RootElement.GetProperty("userPrincipalName").GetString();
+
+                var driveResponse = await client.GetAsync("https://graph.microsoft.com/v1.0/me/drive");
+                if (!driveResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"❌ OneDrive 용량 조회 실패: {(int)driveResponse.StatusCode}");
+                    return null;
+                }
+                using var driveJson = JsonDocument.Parse(await driveResponse.Content.ReadAsStringAsync());
+                ulong totalBytes = driveJson.RootElement.GetProperty("quota").GetProperty("total").GetUInt64();
+                ulong usedBytes = driveJson.RootElement.GetProperty("quota").GetProperty("used").GetUInt64();
+
+                return (email, totalBytes / 1024, usedBytes / 1024);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ OneDrive 계정 정보 조회 API 호출 실패: {ex.Message}");
+                return null;
+            }
         }
     }
 }

@@ -26,12 +26,12 @@ namespace overcloud.Views
             this.MouseDown += (s, e) => { if (e.LeftButton == System.Windows.Input.MouseButtonState.Pressed) this.DragMove(); };
         }
 
-        private void AddAccountWindow_Loaded(object sender, RoutedEventArgs e)
+        private async void AddAccountWindow_Loaded(object sender, RoutedEventArgs e)
         {
             if (_isCoopMode)
             {
                 cooperationComboBox.Visibility = Visibility.Visible;
-                var coopAccounts = _controller.CoopUserRepository.connected_cooperation_account_nums(_userId);
+                var coopAccounts = await OverCloudApiClient.GetMyCoopAccountsAsync() ?? new List<string>();
                 cooperationComboBox.ItemsSource = coopAccounts;
             }
             else
@@ -42,27 +42,39 @@ namespace overcloud.Views
 
         private async void Confirm_Click(object sender, RoutedEventArgs e)
         {
-            string id = txtID.Text;
-            string password = txtPassword.Password;
             string cloudType = (cloudComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? string.Empty;
 
             string targetId = _isCoopMode && cooperationComboBox.SelectedItem != null
                 ? cooperationComboBox.SelectedItem.ToString()
                 : _userId;
 
-            var accountInfo = new CloudStorageInfo
-            {
-                ID = targetId,
-                AccountId = id,
-                AccountPassword = password,
-                CloudType = cloudType,
-                TotalCapacity = 0,
-                UsedCapacity = 0
-            };
+            bool success;
+            string message = null;
 
-            bool success = await _controller.AccountService.Add_Cloud_Storage(accountInfo, _userId);
-            System.Windows.MessageBox.Show(success ? "계정 추가 성공" : "계정 추가 실패");
-            this.Close();
+            if (cloudType == "GoogleDrive" || cloudType == "OneDrive")
+            {
+                // 인터랙티브 OAuth(브라우저 팝업)라 서버에서 대신 못 돌림 — client_id/redirect_uri/scope는
+                // 서버에서 받고, code 교환도 서버가 대신 하지만 브라우저 열기/로컬 리스너는 클라이언트 몫.
+                (success, message) = await overcloud.transfer_manager.StorageAddManager.AddAsync(cloudType, targetId);
+            }
+            else
+            {
+                // Dropbox는 기존 DB 직접 접속 경로 그대로 유지(이번 재설계 범위 밖).
+                var accountInfo = new CloudStorageInfo
+                {
+                    ID = targetId,
+                    AccountId = txtID.Text,
+                    AccountPassword = txtPassword.Password,
+                    CloudType = cloudType,
+                    TotalCapacity = 0,
+                    UsedCapacity = 0
+                };
+                success = await _controller.AccountService.Add_Cloud_Storage(accountInfo, _userId);
+            }
+
+            System.Windows.MessageBox.Show(success ? "계정 추가 성공" : (message ?? "계정 추가 실패"));
+            if (success)
+                this.Close();
         }
 
         private void Close_Click(object sender, RoutedEventArgs e)

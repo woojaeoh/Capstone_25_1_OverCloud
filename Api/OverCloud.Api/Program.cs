@@ -489,6 +489,103 @@ app.MapPost("/api/oauth/onedrive/access-token", async (
     }
 }).RequireAuthorization();
 
+// Phase 4 — 스토리지 추가 1단계: 인증 URL 구성에 필요한 비밀 아님(non-secret) 값을 서버 설정에서 내려준다.
+// 클라이언트가 더 이상 로컬 파일(C:\key\*.json)을 읽지 않게 하기 위함 — client_id/redirect_uri/scope는
+// 유출돼도 문제없는 값이라 인증 없이도 내려줘도 되지만, 일관성을 위해 로그인 이후에만 쓰도록 인가를 건다.
+app.MapGet("/api/oauth/{provider}/client-config", (string provider, IConfiguration config) =>
+{
+    if (provider == "google")
+        return Results.Ok(new { clientId = config["OAuth:Google:ClientId"], redirectUri = GoogleOAuthService.RedirectUri, scope = GoogleOAuthService.Scope });
+    if (provider == "onedrive")
+        return Results.Ok(new { clientId = config["OAuth:OneDrive:ClientId"], redirectUri = OneDriveOAuthService.RedirectUri, scope = OneDriveOAuthService.Scope });
+    return Results.NotFound();
+}).RequireAuthorization();
+
+// Phase 4 — 스토리지 추가 2단계: authorization code -> access/refresh token 교환. client_secret은
+// 서버 설정에서만 읽고(Google) 클라이언트로 절대 안 내려간다. 이 시점엔 아직 CloudStorageInfo 행이
+// 없으므로(계정을 막 연동하는 중) userId 인가 체크가 의미 없다 — 로그인만 확인.
+app.MapPost("/api/oauth/{provider}/exchange-code", async (
+    string provider,
+    ExchangeCodeRequest req,
+    ClaimsPrincipal user,
+    GoogleOAuthService googleOAuth,
+    OneDriveOAuthService oneDriveOAuth) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    try
+    {
+        if (provider == "google")
+        {
+            var (accessToken, refreshToken, expiry) = await googleOAuth.ExchangeAuthorizationCodeAsync(req.Code);
+            return Results.Ok(new { accessToken, refreshToken, expiry });
+        }
+        if (provider == "onedrive")
+        {
+            var (accessToken, refreshToken, expiry) = await oneDriveOAuth.ExchangeAuthorizationCodeAsync(req.Code);
+            return Results.Ok(new { accessToken, refreshToken, expiry });
+        }
+        return Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status400BadRequest);
+    }
+}).RequireAuthorization();
+
+// Phase 4 — 스토리지 추가 3단계: 클라이언트가 이미 계정 연동(코드 교환 + 이메일/용량 조회)을 마친 뒤
+// 호출한다 — select-storage/confirm-upload와 동일한 "클라이언트가 끝낸 뒤 서버는 메타데이터만" 계약.
+// req.UserId는 본인 또는 협업 계정(AddAccountWindow의 협업 대상 선택과 동일). ClientId/ClientSecret은
+// 클라이언트가 보낸 값이 아니라 서버 설정 그대로 채운다 — 아직 이관 안 된 분산 저장 경로
+// (FileUploadManager.Upload_Distributed 등)가 CloudStorageInfo.ClientId/ClientSecret 컬럼을 직접
+// 읽어서 자체 refresh하므로, 새 계정도 이 컬럼이 채워져 있어야 그 기능들이 계속 동작한다.
+app.MapPost("/api/storages", (
+    AddStorageRequest req,
+    ClaimsPrincipal user,
+    IStorageRepository storageRepository,
+    QuotaManager quotaManager,
+    ICoopUserRepository coopUserRepository,
+    IConfiguration config) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, req.UserId, coopUserRepository))
+        return Results.Forbid();
+
+    string? clientId = req.CloudType switch
+    {
+        "GoogleDrive" => config["OAuth:Google:ClientId"],
+        "OneDrive" => config["OAuth:OneDrive:ClientId"],
+        _ => null
+    };
+    string? clientSecret = req.CloudType == "GoogleDrive" ? config["OAuth:Google:ClientSecret"] : null;
+    if (req.CloudType != "GoogleDrive" && req.CloudType != "OneDrive")
+        return Results.BadRequest(new { error = $"지원되지 않는 클라우드: {req.CloudType}" });
+
+    var storage = new CloudStorageInfo
+    {
+        ID = req.UserId,
+        CloudType = req.CloudType,
+        AccountId = req.AccountId,
+        AccountPassword = "",
+        TotalCapacity = req.TotalCapacityKB,
+        UsedCapacity = req.UsedCapacityKB,
+        RefreshToken = req.RefreshToken,
+        ClientId = clientId,
+        ClientSecret = clientSecret
+    };
+
+    bool added = storageRepository.AddCloudStorage(storage, req.UserId);
+    if (!added)
+        return Results.Problem("스토리지 추가 실패", statusCode: StatusCodes.Status500InternalServerError);
+
+    quotaManager.UpdateAggregatedStorageForUser(req.UserId);
+    return Results.Ok(new { storage.CloudStorageNum });
+}).RequireAuthorization();
+
 // Phase 4 — 이슈 트래커: FileIssueInfo.ID가 소유 협업 계정이다. 오늘 반복한 패턴 그대로,
 // sub 본인 또는 그 협업 계정의 정당한 멤버만 접근 가능(IsAuthorizedForAccount). 이슈 단위 조작
 // (수정/삭제/댓글/파일목록)은 issue_id로 GetIssueById를 먼저 조회해 소유 협업 계정을 알아낸 뒤 검증한다 —
@@ -783,6 +880,133 @@ app.MapGet("/api/coop/{coopId}/members", (
     return Results.Ok(coopUserRepository.GetUsersByCoopId(coopId));
 }).RequireAuthorization();
 
+// Phase 4 — 스토리지 삭제 3단계(1/3): 재분배 계획 조회. 5.1처럼 서버는 계획만 세우고 실제 다운로드→업로드는
+// 클라이언트가 직접 한다(GoogleDriveTokenClient/OneDriveTokenClient 재사용, /api/oauth/{provider}/access-token
+// 그대로 재사용 — 옛/새 cloudStorageNum 둘 다 이미 지원). 락/예약 없음 — select-storage와 동일한 수준의
+// TOCTOU를 받아들이기로 함(5.7, "무효화됨" 항목 참고).
+//
+// 분산 파일 조각(RootFileId가 채워진 행 — IsDistributed 플래그는 논리 파일에만 세팅되고 조각엔 없어서
+// 이걸로 판별하면 안 됨)도 일반 파일과 동일하게 후보를 계산한다. 애초에 조각은 업로드 시점에 이미
+// "한 클라우드에 통째로 들어가는 크기"로 쪼개진 상태라, 그 조각 하나를 다른 클라우드로 옮기는 데는
+// 새로 파일을 재분할하는 로직이 전혀 필요 없다 — GetCandidateStorages(조각.FileSize, ...)로 그 조각
+// 크기만큼 들어갈 곳을 찾고, updateFile이 cloud_storage_num/cloud_file_id만 갱신하며 root_file_id는
+// 그대로 두므로(FileRepository.updateFile), 논리 파일-조각 관계는 깨지지 않는다. 다운로드 병합
+// (FileDownloadManager.DownloadAndMergeFile)도 조각마다 그때그때 CloudStorageNum을 조회해 쓰므로
+// 조각이 재배치돼도 투명하게 동작한다. (이전엔 "분산 재분배는 완전히 다른 설계가 필요하다"고 보고
+// unsupported로 막았었는데, 이 전제가 틀렸음이 확인돼 철회함.)
+app.MapGet("/api/storages/{cloudStorageNum:int}/redistribution-plan", (
+    int cloudStorageNum,
+    string userId,
+    ClaimsPrincipal user,
+    IStorageRepository storageRepository,
+    IFileRepository fileRepository,
+    CloudTierManager cloudTierManager,
+    QuotaManager quotaManager,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, userId, coopUserRepository))
+        return Results.Forbid();
+
+    var targetStorage = storageRepository.GetCloud(cloudStorageNum, userId);
+    if (targetStorage == null)
+        return Results.NotFound();
+
+    var files = fileRepository.GetFilesByStorageNum(cloudStorageNum);
+
+    // 사전 용량 체크(기존 AccountService.Delete_Cloud_Storage와 같은 취지) — 여기서는 단위를 맞춰서 비교한다.
+    // GetTotalRemainingQuotaInBytes_Delete_Account는 바이트, AllFilelistSize는 KB를 반환한다(원래 클라이언트
+    // 코드는 이 둘을 단위 변환 없이 그냥 비교하고 있었다 — 사실상 항상 통과하는 무의미한 체크였다. 여기서 고침).
+    ulong remainingElsewhereBytes = quotaManager.GetTotalRemainingQuotaInBytes_Delete_Account(userId, cloudStorageNum);
+    ulong filesSizeBytes = quotaManager.AllFilelistSize(cloudStorageNum) * 1024;
+    if (remainingElsewhereBytes < filesSizeBytes)
+        return Results.Conflict(new { error = "다른 클라우드에 재분배할 공간이 부족합니다." });
+
+    var planFiles = files.Select(f =>
+    {
+        var candidates = cloudTierManager.GetCandidateStorages(f.FileSize, userId, cloudStorageNum)
+            .Take(5)
+            .Select(c => new CandidateStorage(c.CloudStorageNum, c.CloudType, c.AccountId))
+            .ToList();
+
+        return new RedistributionFilePlan(f.FileId, f.FileName, f.CloudFileId, f.FileSize, candidates);
+    }).ToList();
+
+    return Results.Ok(new RedistributionPlan(planFiles));
+}).RequireAuthorization();
+
+// Phase 4 — 스토리지 삭제 3단계(2/3): 파일 재배치 확정. 클라이언트가 이미 새 클라우드에 업로드하고 옛
+// 클라우드에서 삭제까지 마친 뒤 호출한다 — 업로드/삭제 엔드포인트와 동일한 "클라이언트가 끝낸 뒤 서버는
+// 메타데이터/할당량만" 계약. blind update라 select-storage/confirm-upload와 동일한 TOCTOU를 받아들인다(5.7).
+app.MapPost("/api/files/{fileId:int}/relocate-confirm", (
+    int fileId,
+    RelocateConfirmRequest req,
+    ClaimsPrincipal user,
+    IFileRepository fileRepository,
+    QuotaManager quotaManager,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+
+    var file = fileRepository.GetFileById(fileId);
+    if (file == null)
+        return Results.NotFound();
+    if (!IsAuthorizedForAccount(sub, file.ID, coopUserRepository))
+        return Results.Forbid();
+
+    int oldCloudStorageNum = file.CloudStorageNum;
+    ulong fileSizeKB = file.FileSize;
+
+    file.CloudStorageNum = req.NewCloudStorageNum;
+    file.CloudFileId = req.NewCloudFileId;
+    fileRepository.updateFile(file);
+
+    quotaManager.UpdateQuotaAfterUploadOrDelete(oldCloudStorageNum, fileSizeKB, false, file.ID);
+    quotaManager.UpdateQuotaAfterUploadOrDelete(req.NewCloudStorageNum, fileSizeKB, true, file.ID);
+
+    return Results.Ok();
+}).RequireAuthorization();
+
+// Phase 4 — 스토리지 삭제 3단계(3/3): 실제 삭제 확정. 남은 파일(분산 파일 조각 포함 — 이제 조각도 일반
+// 파일과 동일하게 재분배 대상이라 특별 취급하지 않는다)이 하나라도 있으면 막는다. 재시도는
+// redistribution-plan을 다시 부르면 자동으로 남은 파일만 돌아온다(relocate-confirm 성공 시 조각의
+// cloud_storage_num이 바뀌므로 GetFilesByStorageNum 조회에서 자연스럽게 빠짐).
+app.MapDelete("/api/storages/{cloudStorageNum:int}", (
+    int cloudStorageNum,
+    string userId,
+    ClaimsPrincipal user,
+    IStorageRepository storageRepository,
+    IFileRepository fileRepository,
+    QuotaManager quotaManager,
+    ICoopUserRepository coopUserRepository) =>
+{
+    var sub = user.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+    if (sub == null)
+        return Results.Unauthorized();
+    if (!IsAuthorizedForAccount(sub, userId, coopUserRepository))
+        return Results.Forbid();
+
+    var targetStorage = storageRepository.GetCloud(cloudStorageNum, userId);
+    if (targetStorage == null)
+        return Results.NotFound();
+
+    var remainingFiles = fileRepository.GetFilesByStorageNum(cloudStorageNum);
+    if (remainingFiles.Count > 0)
+    {
+        return Results.Conflict(new { error = "아직 재분배되지 않은 파일이 있습니다. 재분배 계획을 다시 조회해 남은 파일을 마저 이동해주세요." });
+    }
+
+    bool deleted = storageRepository.DeleteCloudStorage(cloudStorageNum, userId);
+    if (deleted)
+        quotaManager.UpdateAggregatedStorageForUser(userId);
+
+    return deleted ? Results.NoContent() : Results.Problem("스토리지 삭제 실패", statusCode: StatusCodes.Status500InternalServerError);
+}).RequireAuthorization();
+
 app.Run();
 
 record LoginRequest(string UserId, string Password);
@@ -797,3 +1021,9 @@ record IssueUpdateRequest(string Title, string? Description, string? AssignedTo,
 record IssueCommentRequest(string Content);
 record CoopCreateRequest(string CoopId, string Password);
 record CoopJoinRequest(string CoopId, string Password);
+record CandidateStorage(int CloudStorageNum, string CloudType, string AccountId);
+record RedistributionFilePlan(int FileId, string FileName, string CloudFileId, ulong FileSizeKB, List<CandidateStorage> Candidates);
+record RedistributionPlan(List<RedistributionFilePlan> Files);
+record RelocateConfirmRequest(int NewCloudStorageNum, string NewCloudFileId);
+record ExchangeCodeRequest(string Code);
+record AddStorageRequest(string UserId, string CloudType, string AccountId, string RefreshToken, ulong TotalCapacityKB, ulong UsedCapacityKB);

@@ -25,7 +25,8 @@ namespace overcloud.Views
             LoadAccounts();
         }
 
-        private void LoadAccounts()
+        // 생성자에서 fire-and-forget으로 호출(생성자는 async일 수 없음) — 다른 async void UI 핸들러와 동일한 패턴.
+        private async void LoadAccounts()
         {
             System.Diagnostics.Debug.WriteLine("계정 불러오기 시작");
 
@@ -34,7 +35,7 @@ namespace overcloud.Views
             if (_is_shared)
             {
                 // 협업 클라우드에 속한 모든 계정 불러오기
-                List<string> coopIds = _controller.CoopUserRepository.connected_cooperation_account_nums(_user_id);
+                List<string> coopIds = await OverCloudApiClient.GetMyCoopAccountsAsync() ?? new List<string>();
                 foreach (var coopId in coopIds)
                 {
                     var accounts = _controller.AccountService.Get_Clouds_For_User(coopId);
@@ -65,11 +66,14 @@ namespace overcloud.Views
             // userNum을 이용해 삭제 처리
             int CloudStorageNum = selectedAccount.CloudStorageNum;
 
-            // temp_class의 RemoveAccount 호출
-            bool result = await _controller.AccountService.Delete_Cloud_Storage(CloudStorageNum, _user_id);
+            // 소유자는 _user_id(로그인한 본인)가 아니라 selectedAccount.ID다 — 협업 계정 스토리지(_is_shared)를
+            // 지울 때 _user_id를 쓰면 서버가 그 협업 계정 소유가 아닌 걸로 판단해 항상 실패한다(기존 버그 수정).
+            var (result, message) = await overcloud.transfer_manager.StorageRedistributionManager
+                .DeleteStorageAsync(CloudStorageNum, selectedAccount.ID, selectedAccount.CloudType);
 
-            System.Windows.MessageBox.Show(result ? "계정 삭제 성공" : "계정 삭제 실패");
-            this.Close();
+            System.Windows.MessageBox.Show(result ? "계정 삭제 성공" : (message ?? "계정 삭제 실패"));
+            if (result)
+                this.Close();
         }
 
         private void Close_Click(object sender, RoutedEventArgs e)
